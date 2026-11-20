@@ -17,7 +17,7 @@ import { agents, appHome, knownAgents, exec, home, readTextFile, shared, setShar
 import * as u from "./usage.js";
 
 const KEY = "herdr-usage.v1";
-const LIVE = "herdr-usage.live.v1";
+const LIVE = "herdr-usage.live.v2";
 const READING = "herdr-usage.reading.v1";
 const RAN = "herdr-usage.ran.v1";
 /** A read that started this long ago and never finished (the mod reloaded mid-read) no longer blocks. */
