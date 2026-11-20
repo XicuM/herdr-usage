@@ -139,6 +139,15 @@ test("a refused read keeps the last limits, marked stale when old", () => {
   assert.equal(u.shown(merged, "codex", later).limits.length, 1);
 });
 
+test("a failed read keeps a spend-only provider's numbers, and says it failed", () => {
+  const old = { at: 1_000, usage: { today_tokens: 5 }, limitsAt: null };
+  const merged = u.merge(old, null, 2_000);
+  assert.deepEqual(merged.usage, { today_tokens: 5 });
+  const shown = u.shown({ ...merged, failed: true }, "pi", 2_000);
+  assert.equal(shown.failed, true);
+  assert.equal(shown.stale, false);
+});
+
 test("a limit whose window has reset is shown as expired, never as 0%", () => {
   const entry = { at: Date.now(), limitsAt: Date.now(), usage: { limits: [{ label: "x", percent: 0.5, resets_at: "2000-01-01T00:00:00Z" }] } };
   const limits = u.shown(entry, "claude").limits;
