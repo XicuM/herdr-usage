@@ -1,6 +1,6 @@
 # Herdr Usage
 
-How much quota is left on each AI account your running agents use, at the right end of Herdr's status bar: the agent's icon, a draining bar with a pace tick, and each window's share left ("5h 62% · 7d 17%"), coloured as it runs out. Click a provider for a popup with every limit, when it resets, how its pace compares with the window, paid credit past the limits, and today's and the week's tokens, prompts and spend, with a tab for every installed agent's account.
+How much quota is left on each AI account your running agents use, at the right end of Herdr's status bar: the agent's icon and each window's share left ("5h 62% · 7d 17%"), coloured as it runs out. Click a provider for a popup with every limit, when it resets, paid credit past the limits, and today's and the week's tokens, prompts and spend, with a tab for every installed agent's account.
 
 It covers Claude, Codex, Antigravity/Gemini, Grok, OpenCode Go, Copilot, Cursor, OpenRouter, DeepSeek, Pi and Amp, and reads their usage itself, with no server or companion app.
 
@@ -25,11 +25,10 @@ The mod sizes its own block to its text. Copy the mod, don't symlink it: Herdr w
 
 ## What you see
 
-- **The bar**: one group per provider of the agents running now, in the agents' order. Several agents on one account share one group. Each limit is a short label, a 26×3px bar draining with the share **left**, a 1px tick at the **time left**, and the percent left. The share is green below 75% used, amber from 75%, red from 90%. Amber and red also add the time to reset (`· 2d 10h`).
-- **The pace tick**: bar past the tick means quota is going faster than the window. Hover a group for the numbers ("33% of the window left · using it faster than the window").
+- **The bar**: one group per provider of the agents running now, in the agents' order. Several agents on one account share one group. Each limit is a short label and the percent **left**. The share is green below 75% used, amber from 75%, red from 90%. Amber and red also add the time to reset (`· 2d 10h`).
 - **Honest states**: a provider that fails keeps its last good reading, dimmed, with `!` and its age. A window whose reset time has passed shows `—`, never a guessed 0%. A reading over 15 minutes old is dimmed.
-- **The popup**: flat like Herdr's menus. Every limit has its label, detail, reset and share left, with a bar and pace tick. Extra usage and credits get a row without a bar. Antigravity's Claude and GPT tiers are one row. A reset line appears when Claude or Codex offers a usage-limit reset. At the bottom, one tab per provider: the running ones first, then the other installed agents', dimmed and read when picked.
-- **Today's and the week's spend**: `Today: 1.2M tokens · 51 prompts · $3.40 · 7d 4.5M tokens`, where the source records it. OpenCode and Pi show tokens over seven days; OpenRouter adds week and month dollars.
+- **The popup**: flat like Herdr's menus. The provider's name is in larger, lighter text with its icon, beside its plan and the reading's age. Every limit has its label, detail, reset and share left, with a bar. Extra usage and credits get a row without a bar. Antigravity's Claude and GPT tiers are one row. A reset line appears when Claude or Codex offers a usage-limit reset. At the bottom, one tab per provider: the running ones first, then the other installed agents', dimmed and read when picked. Tabs wrap onto another row instead of being cropped.
+- **Today's and the week's spend**: two lines, `Today: 1.2M tokens · 51 prompts · $3.40` and `7 days: 4.5M tokens · 510 prompts`, where the source records it. OpenCode and Pi show tokens over seven days; OpenRouter adds week and month dollars.
 - **Spend-only providers**: OpenCode without a Go key and Pi have no limits; the bar shows `today 240k` and the popup shows today and the week.
 
 ## Providers
@@ -74,7 +73,7 @@ rsync -a --delete mods/herdr-usage/ ~/.config/herdr-app/mods/herdr-usage/
 
 ## Credits
 
-The CLI helpers and several ideas — per-model windows, the pace tick, explicit stale and passed-reset states, the OpenCode store dedupe — are adapted from [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits) (MIT). The approach for Claude's `get_usage` comes from [jmalicki/herdr-mod-ai-usage](https://github.com/jmalicki/herdr-mod-ai-usage) (MIT). The rest is ported from herdr-bridge's `usage.rs`.
+The CLI helpers and several ideas — per-model windows, explicit stale and passed-reset states, the OpenCode store dedupe — are adapted from [nozikov/herdr-usage-limits](https://github.com/nozikov/herdr-usage-limits) (MIT). The approach for Claude's `get_usage` comes from [jmalicki/herdr-mod-ai-usage](https://github.com/jmalicki/herdr-mod-ai-usage) (MIT). The rest is ported from herdr-bridge's `usage.rs`.
 
 ## License
 

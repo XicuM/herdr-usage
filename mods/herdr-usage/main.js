@@ -348,16 +348,28 @@ const rowsFor = (prov) => {
   return Math.max(entry ? 1 : (u.ROWS[prov] ?? 1), actual);
 };
 
+/** Today's and the week's lines a provider's tab shows. */
+const infoLinesFor = (prov) => {
+  const us = u.shown(shared(KEY)?.[prov], prov);
+  if (!us) return 0;
+  const today = us.today_tokens != null || us.today_prompts != null || us.today_cost > 0;
+  const week = us.week_tokens != null || us.week_prompts != null || us.week_cost > 0 || us.month_cost > 0;
+  return Number(today) + Number(week);
+};
+
+/** Seven 31px tabs fit 280px wide, with room for a text-only one; more providers get another row. */
+const tabRowsFor = (tabs) => {
+  const rows = [];
+  for (let i = 0; i < tabs.length; i += 7) rows.push(tabs.slice(i, i + 7));
+  return rows;
+};
+
 /** A popup row's height: a line of text and a 3px bar 5px under it, with about 11px above and below, so rows
  *  stand clearly apart and each bar reads as its own label's. */
 const ROW = 46;
-/** A popup row's bar is 254px wide: 280 minus the popup's and the row's side padding. */
-const ROW_BAR_W = 254;
-/** The bar beside a limit: its fill drains with the quota left, the tick marks the time left. */
-const BAR_W = 26;
-const bar = (fill, tick, color, t) => div().relative().w(BAR_W).h(3).rounded(2).bg(t.border).flex_none()
-  .child(div().absolute().left(0).top(0).h(3).rounded(2).w(Math.round(BAR_W * Math.max(0, Math.min(1, fill)))).bg(color))
-  .when(tick != null, (b) => b.child(div().absolute().top(-2).left(Math.round(BAR_W * Math.max(0, Math.min(1, tick)))).w(1).h(7).bg(t.foreground).opacity(0.75)));
+/** The popup's today/week lines: one 22px line each, after a 9px divider. */
+const INFO_ROW = 22;
+const INFO_DIVIDER = 9;
 
 /** The layout block this mod sits in. It sizes it to its text, so it reads as part of the status bar. */
 const BLOCK = "herdr-usage";
@@ -427,28 +439,22 @@ export default class Usage extends View {
   render() {
     const t = theme();
     if (this.sheetFor) return this.sheet(t);
-    // One group per provider, "Claude 5h 75% · 7d 19%": the share left, a bar draining with it and a tick at the
-    // time left; a balance as its amount; a spend-only provider as today's tokens.
+    // One group per provider, "Claude 5h 75% · 7d 19%": the share left, coloured by the share used; a balance as
+    // its amount; a spend-only provider as today's tokens.
     const groups = providers().map((p) => {
       const entry = shared(KEY)?.[p];
       const us = u.shown(entry, p);
       const limits = u.onBar(us?.limits);
       const failed = Boolean(entry?.failed) || Boolean(us?.stale);
       const pic = icon(agents().find((a) => provider(a) === p)?.program, 13, t.muted)?.mr(4);
-      const tip = [`${u.NAMES[p]}: quota left; click for details`, ...limits.flatMap((l) => {
-        const pace = u.paceText(l);
-        return pace ? [`${u.shortLabel(l.label)}: ${pace}`] : [];
-      })].join("\n");
       const parts = limits.flatMap((l, i) => {
         const used = Math.min(Math.max(l.percent, 0), 1);
-        const p = u.pace(l);
         const color = t[u.tone(used)] ?? t.muted;
         const reset = !l.expired && used >= 0.75 && l.resets_at ? u.resetsIn(l.resets_at).replace(/^in /, "") : null;
         return [
           ...(i ? [div().text_color(t.dim).child("·")] : []),
           h_flex().gap(4).items_center()
             .child(div().child(u.shortLabel(l.label)))
-            .when(!l.title && !l.expired, (el) => el.child(bar(1 - used, p?.left ?? null, color, t)))
             .child(div().font_semibold().text_color(l.expired ? t.dim : l.title ? t.foreground : color).child(l.expired ? "—" : l.title ?? `${Math.round((1 - used) * 100)}%`))
             .when(Boolean(reset), (el) => el.child(div().text_size(10).text_color(t.dim).child(reset))),
         ];
@@ -465,7 +471,6 @@ export default class Usage extends View {
         .opacity(failed ? 0.55 : 1)
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
-        .tooltip(tip)
         .on_click(() => this.open(p))
         // The agent's icon, as herdr-mobile shows it; its name only when it has none.
         .child(pic ?? div().text_color(t.foreground).child(u.NAMES[p]))
@@ -501,12 +506,16 @@ export default class Usage extends View {
 
   // The popup on provider p's tab, sized for the tab that shows the most rows, so no tab scrolls or is cut off.
   // Every part has a fixed height: 5px padding twice, the 24px title, ROW-tall rows, the reset line when there is
-  // one (a 9px divider and 28px), today's line (the same) and, with several tabs, the tab row (a 9px divider and 31px).
+  // one (a 9px divider and 28px), today/week lines, and the tab rows (a 9px divider and 31px each).
   open(p) {
     const tabs = tabsFor(this.installed);
     const rows = Math.max(...tabs.map((x) => rowsFor(x.p)), 1);
     const reset = tabs.some((x) => u.shown(shared(KEY)?.[x.p], x.p)?.reset_note) ? 37 : 0;
-    const height = 10 + 24 + ROW * rows + reset + 37 + (tabs.length > 1 ? 40 : 0);
+    const info = Math.max(...tabs.map((x) => infoLinesFor(x.p)), 0);
+    const infoHeight = info ? INFO_DIVIDER + INFO_ROW * info : 0;
+    const tabRows = tabRowsFor(tabs).length;
+    const tabsHeight = tabs.length > 1 ? INFO_DIVIDER + 31 * tabRows + 2 * (tabRows - 1) : 0;
+    const height = 10 + 24 + ROW * rows + reset + infoHeight + tabsHeight;
     openOverlay({ mod: "herdr-usage", kind: "popup", width: 280, height, props: { sheet: p, installed: this.installed } });
   }
 
@@ -526,11 +535,9 @@ export default class Usage extends View {
     const row = (l) => {
       const used = Math.min(Math.max(l.percent, 0), 1);
       const color = l.expired ? t.dim : t[u.tone(used)] ?? t.muted;
-      const p = l.expired ? null : u.pace(l);
       const detail = l.expired ? "reset, waiting for a new reading"
         : [l.status, l.detail, l.resets_at && `resets ${u.resetsIn(l.resets_at)}`].filter(Boolean).join(" · ");
       const line = h_flex().gap(8).items_center()
-        .when(Boolean(p), (el) => el.tooltip(u.paceText(l)))
         .child(div().min_w(0).truncate().text_color(l.expired ? t.dim : t.foreground).child(u.longLabel(l.label)))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(detail))
         .child(l.expired
@@ -542,29 +549,51 @@ export default class Usage extends View {
               .child(div().text_color(color).child(`${Math.round((1 - used) * 100)}%`))
               .child(div().text_size(11).text_color(t.dim).child("left")));
       return v_flex().h(ROW).px(8).gap(5).justify_center().flex_none().child(line)
-        .when(!l.title && !l.expired, (el) => el.child(div().relative().w_full().h(3).rounded(2).bg(t.border)
-          .child(div().absolute().left(0).top(0).h(3).rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))
-          .when(p?.left != null, (b) => b.child(div().absolute().top(-2).left(Math.round(ROW_BAR_W * p.left)).w(1).h(7).bg(t.foreground).opacity(0.75)))));
+        .when(!l.title && !l.expired, (el) => el.child(div().w_full().h(3).rounded(2).bg(t.border)
+          .child(div().h_full().rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))));
     };
     const today = [
       us?.today_tokens != null && `${u.formatTokens(us.today_tokens)} tokens`,
       us?.today_prompts != null && `${us.today_prompts} prompts`,
       us?.today_cost > 0 && `$${us.today_cost.toFixed(2)}`,
-      us?.week_tokens != null && `7d ${u.formatTokens(us.week_tokens)} tokens`,
-      us?.week_prompts != null && `7d ${us.week_prompts} prompts`,
-      us?.week_cost > 0 && `week $${us.week_cost.toFixed(2)}`,
+    ].filter(Boolean);
+    const week = [
+      us?.week_tokens != null && `${u.formatTokens(us.week_tokens)} tokens`,
+      us?.week_prompts != null && `${us.week_prompts} prompts`,
+      us?.week_cost > 0 && `$${us.week_cost.toFixed(2)}`,
       us?.month_cost > 0 && `month $${us.month_cost.toFixed(2)}`,
     ].filter(Boolean);
+    const info = [today.length ? `Today: ${today.join(" · ")}` : null, week.length ? `7 days: ${week.join(" · ")}` : null].filter(Boolean);
     const age = entry?.failed && entry.limitsAt ? u.ago(entry.limitsAt) : entry?.at ? u.ago(entry.at) : null;
     const state = entry?.failed ? `last good reading ${age}` : age ? `updated ${age}` : null;
+    const tab = tabs.find((x) => x.p === p);
+    const tabRow = (row) => h_flex().gap(2).flex_none().children(row.map((x) => h_flex()
+      .id(`tab-${x.p}`)
+      .h(31)
+      .min_w(31)
+      .px(8)
+      .justify_center()
+      .items_center()
+      .rounded(7)
+      .when(x.p === p, (el) => el.bg(t.selected))
+      .when(x.p !== p, (el) => el.hover((s) => s.bg(t.hover)))
+      .tooltip(x.dim ? `${u.NAMES[x.p]} (not running)` : u.NAMES[x.p])
+      .on_click((_e, cx) => {
+        this.sheetFor = x.p;
+        this.read(x.p, cx);
+        cx.notify();
+      })
+      .child(div().when(x.dim && x.p !== p, (el) => el.opacity(0.4))
+        .child(icon(x.program, 14, x.p === p ? t.foreground : t.muted) ?? div().text_size(11).text_color(t.muted).child(u.NAMES[x.p])))));
     return v_flex()
       .size_full()
       .p(5)
       .bg(t.popover)
       .text_size(12.8)
       // The provider and its plan, as Herdr's popups title themselves.
-      .child(h_flex().h(24).px(8).gap(8).items_center().flex_none()
-        .child(div().text_size(11).text_color(t.dim).child(u.NAMES[p] ?? p))
+      .child(h_flex().h(24).px(8).gap(7).items_center().flex_none()
+        .when(Boolean(tab?.program?.icon), (el) => el.child(icon(tab.program, 14, t.foreground)))
+        .child(div().text_size(13).font_semibold().text_color(t.foreground).child(u.NAMES[p] ?? p))
         .when(Boolean(us?.tier_label), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`· ${us.tier_label}`)))
         .when(Boolean(state), (el) => el.child(div().text_size(11).text_color(t.dim).child(state))))
       .child(v_flex().flex_1().min_h(0)
@@ -574,26 +603,11 @@ export default class Usage extends View {
         .children(limits.map(row))
         // A usage-limit reset Claude or Codex offers, when one is left.
         .when(Boolean(us?.reset_note), (el) => el.child(divider()).child(h_flex().px(8).h(28).items_center().text_size(11).text_color(t.dim).child(us.reset_note)))
-        .when(today.length > 0, (el) => el.child(divider()).child(h_flex().px(8).h(28).items_center().text_size(11).text_color(t.dim).child(`Today: ${today.join(" · ")}`))))
+        .when(info.length > 0, (el) => el.child(divider()).child(v_flex().flex_none()
+          .children(info.map((line) => h_flex().h(INFO_ROW).px(8).items_center()
+            .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(line)))))))
       // One tab per provider, at the bottom: the running ones, then the other installed agents', dimmed.
-      .when(tabs.length > 1, (el) => el.child(divider()).child(h_flex().gap(2).flex_none()
-        .children(tabs.map((x) => h_flex()
-          .id(`tab-${x.p}`)
-          .h(31)
-          .min_w(31)
-          .px(8)
-          .justify_center()
-          .items_center()
-          .rounded(7)
-          .when(x.p === p, (el) => el.bg(t.selected))
-          .when(x.p !== p, (el) => el.hover((s) => s.bg(t.hover)))
-          .tooltip(x.dim ? `${u.NAMES[x.p]} (not running)` : u.NAMES[x.p])
-          .on_click((_e, cx) => {
-            this.sheetFor = x.p;
-            this.read(x.p, cx);
-            cx.notify();
-          })
-          .child(div().when(x.dim && x.p !== p, (el) => el.opacity(0.4))
-            .child(icon(x.program, 14, x.p === p ? t.foreground : t.muted) ?? div().text_size(11).text_color(t.muted).child(u.NAMES[x.p])))))));
+      .when(tabs.length > 1, (el) => el.child(divider()).child(v_flex().gap(2).flex_none()
+        .children(tabRowsFor(tabs).map(tabRow))));
   }
 }
