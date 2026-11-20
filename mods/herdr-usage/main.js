@@ -170,7 +170,8 @@ async function readOpencode() {
       await run("sqlite3", ["-readonly", H(".local/share/opencode/opencode.db"), "select value from credential where integration_id='opencode-go' and active=1 limit 1;"]),
       await read(H(".local/share/opencode/auth.json")),
     );
-    return key && u.opencodeLimits((await getJson("https://opencode.ai/zen/go/v1/usage", { Authorization: `Bearer ${key}` }))?.usage);
+    // Cloudflare (error 1010) rejects a request without a User-Agent, which is what Herdr's fetch sends.
+    return key && u.opencodeLimits((await getJson("https://opencode.ai/zen/go/v1/usage", { Authorization: `Bearer ${key}`, "User-Agent": "opencode/1.0" }))?.usage);
   }) ?? [];
   // ai-usagebar keeps this same reply, under `response`, for its own display.
   if (!limits.length) {
