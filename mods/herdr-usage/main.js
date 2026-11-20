@@ -3,7 +3,8 @@
 // tokens and prompts. As herdr-mobile showed them through herdr-bridge; this reads the same
 // sources itself. The logic is in usage.js.
 //
-// Roles: no props, the status bar groups; { sheet: <provider> }, the popup a group opens.
+// Roles: no props, the status bar groups; { sheet: <provider> }, the popup a group opens, with a tab per
+// provider: the running ones, then dimmed, the other installed agents', read only when their tab is picked.
 // Shared state, so every copy and every restart sees one cache and one throttle per slow source:
 //   herdr-usage.v1          { [provider]: { at, usage, limitsAt } }
 //   herdr-usage.live.v1     { [source]: { at, value } }   (every online source, agy and amp: asked rarely)
@@ -11,7 +12,7 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, exec, home, readTextFile, shared, setShared, settings, theme, openOverlay, props, checking, run as runCommand } from "herdr";
+import { agents, knownAgents, exec, home, readTextFile, shared, setShared, settings, theme, openOverlay, props, checking, run as runCommand } from "herdr";
 import * as u from "./usage.js";
 
 const KEY = "herdr-usage.v1";
@@ -261,30 +262,50 @@ const BLOCK = "herdr-usage";
 export default class Usage extends View {
   init(_props, cx) {
     this.sheetFor = props()?.sheet ?? null;
-    if (this.sheetFor || checking()) return;
+    if (checking()) return;
+    if (this.sheetFor) {
+      // The installed agents' providers, for the dimmed tabs. Herdr checks at most once a minute.
+      this.installed = [];
+      cx.spawn(async (cx) => {
+        try {
+          const seen = new Set();
+          for (const k of await knownAgents()) {
+            const p = k.installed ? u.providerOf(k.key) ?? u.providerOf(k.name) : null;
+            if (!p || seen.has(p)) continue;
+            seen.add(p);
+            this.installed.push({ p, program: k });
+          }
+        } catch {}
+        cx.notify();
+      });
+      return;
+    }
     this.refresh(cx);
     cx.timer.every(5_000, (cx) => this.refresh(cx));
   }
 
-  // Reads each running agent's provider again when its cache is old. Rendering follows the shared state.
+  // Each running agent's provider, read again when its numbers are old.
   refresh(cx) {
-    for (const p of providers()) {
-      const now = Date.now();
-      if (now - (shared(KEY)?.[p]?.at ?? 0) < u.CACHE_TTL) continue;
-      if (now - (shared(READING)?.[p] ?? 0) < READ_TIMEOUT) continue;
-      setShared(READING, { ...shared(READING), [p]: now });
-      cx.spawn(async () => {
-        let fresh = null;
-        try {
-          fresh = await READERS[p]();
-        } catch (e) {
-          console.log(`herdr-usage: ${p}: ${e}`);
-        }
-        const all = shared(KEY) ?? {};
-        setShared(KEY, { ...all, [p]: u.merge(all[p], fresh) });
-        setShared(READING, { ...shared(READING), [p]: 0 });
-      });
-    }
+    for (const p of providers()) this.read(p, cx);
+  }
+
+  // Reads a provider when its numbers are over CACHE_TTL old and no read is under way. Rendering follows the shared state.
+  read(p, cx) {
+    const now = Date.now();
+    if (now - (shared(KEY)?.[p]?.at ?? 0) < u.CACHE_TTL) return;
+    if (now - (shared(READING)?.[p] ?? 0) < READ_TIMEOUT) return;
+    setShared(READING, { ...shared(READING), [p]: now });
+    cx.spawn(async () => {
+      let fresh = null;
+      try {
+        fresh = await READERS[p]();
+      } catch (e) {
+        console.log(`herdr-usage: ${p}: ${e}`);
+      }
+      const all = shared(KEY) ?? {};
+      setShared(KEY, { ...all, [p]: u.merge(all[p], fresh) });
+      setShared(READING, { ...shared(READING), [p]: 0 });
+    });
   }
 
   render() {
@@ -346,10 +367,17 @@ export default class Usage extends View {
 
   sheet(t) {
     const p = this.sheetFor;
-    const us = u.shown(shared(KEY)?.[p], p);
+    const entry = shared(KEY)?.[p];
+    const us = u.shown(entry, p);
+    // Running providers first, then the other installed agents' providers, dimmed.
+    const running = providers();
+    const tabs = [
+      ...running.map((q) => ({ p: q, program: agents().find((a) => provider(a) === q)?.program, dim: false })),
+      ...(this.installed ?? []).filter((x) => !running.includes(x.p)).map((x) => ({ ...x, dim: true })),
+    ];
     // Primary limits first; Antigravity's Claude and GPT tiers after, under "Other models".
     const limits = [...u.primary(us?.limits), ...(us?.limits ?? []).filter((l) => l.primary === false)];
-    const pic = icon(agents().find((a) => provider(a) === p)?.program, 20, t.foreground);
+    const pic = icon(tabs.find((x) => x.p === p)?.program, 20, t.foreground);
     const box = () => v_flex().p(10).gap(6).rounded(8).bg(t.raised);
     const stat = (value, label) => v_flex().items_center().child(div().text_size(15).font_bold().child(value)).child(div().text_size(11).text_color(t.muted).child(label));
     return v_flex()
@@ -359,6 +387,26 @@ export default class Usage extends View {
       .bg(t.popover)
       .text_color(t.foreground)
       .text_size(12.5)
+      .when(tabs.length > 1, (el) => el.child(h_flex().gap(4).pb(6).border_b(1).border_color(t.border)
+        .children(tabs.map((x) => h_flex()
+          .id(`tab-${x.p}`)
+          .h(28)
+          .min_w(32)
+          .px(8)
+          .justify_center()
+          .items_center()
+          .rounded(6)
+          .cursor_pointer()
+          .when(x.p === p, (el) => el.bg(t.selected))
+          .when(x.p !== p, (el) => el.hover((s) => s.bg(t.hover)))
+          .when(x.dim, (el) => el.opacity(0.45))
+          .tooltip(x.dim ? `${u.NAMES[x.p]} (not running)` : u.NAMES[x.p])
+          .on_click((_e, cx) => {
+            this.sheetFor = x.p;
+            this.read(x.p, cx);
+            cx.notify();
+          })
+          .child(icon(x.program, 16, t.foreground) ?? div().text_size(11).child(u.NAMES[x.p]))))))
       .child(h_flex().gap(10).items_center()
         .when(Boolean(pic), (el) => el.child(pic))
         .child(v_flex()
@@ -381,7 +429,10 @@ export default class Usage extends View {
               .when(Boolean(l.resets_at), (el) => el.child(div().child(`Resets ${u.resetsIn(l.resets_at)}`))));
         return [...(other ? [div().pt(4).text_size(11).text_color(t.muted).child("Other models")] : []), card];
       }))
-      .when(!limits.length, (el) => el.child(div().py(8).text_color(t.muted).child("No rate limits recorded.")))
+      // Not read yet: a dimmed tab just picked. Read, but nothing found: no login, or an expired one.
+      .when(!entry, (el) => el.child(div().py(8).text_color(t.muted).child("Reading…")))
+      .when(Boolean(entry) && !us, (el) => el.child(div().py(8).text_color(t.muted).child("Not signed in, or the login has expired.")))
+      .when(Boolean(us) && !limits.length, (el) => el.child(div().py(8).text_color(t.muted).child("No rate limits recorded.")))
       .when(us?.today_tokens != null || us?.today_prompts != null, (el) => el.child(box().child(h_flex().justify_around()
         .when(us.today_tokens != null, (el) => el.child(stat(u.formatTokens(us.today_tokens), "Tokens today")))
         .when(us.today_prompts != null, (el) => el.child(stat(String(us.today_prompts), "Prompts today"))))));

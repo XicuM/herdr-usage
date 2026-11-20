@@ -1,6 +1,6 @@
 # Herdr Usage
 
-How much quota is left on each AI account your running agents use, at the right end of Herdr's status bar: the agent's icon, then each window's share left ("5h 62% · 7d 17%"), coloured as it runs out. Click a provider for a popup with each limit, when it resets, and today's tokens and prompts. It covers Claude, Codex, Antigravity/Gemini, Grok, OpenCode Go, Copilot, Cursor, OpenRouter, DeepSeek and Amp, and reads their usage itself, with no server or companion app.
+How much quota is left on each AI account your running agents use, at the right end of Herdr's status bar: the agent's icon, then each window's share left ("5h 62% · 7d 17%"), coloured as it runs out. Click a provider for a popup with each limit, when it resets, and today's tokens and prompts, with a tab for every installed agent's account. It covers Claude, Codex, Antigravity/Gemini, Grok, OpenCode Go, Copilot, Cursor, OpenRouter, DeepSeek and Amp, and reads their usage itself, with no server or companion app.
 
 ![Herdr Usage](preview.png)
 
@@ -13,11 +13,12 @@ How much quota is left on each AI account your running agents use, at the right 
   - A balance with no limit (DeepSeek) shows its amount instead, in `foreground` ("Balance (USD) 4.20 USD"). A provider known but with no limit yet shows a `dim` "–".
   - Tooltip: "Claude: quota left; click for details".
 - **The popup** (320×420, `popover` background, 14px padding, 8px gaps, 12.5px `foreground` text):
+  - With more than one provider, a row of tabs on top (4px apart, 6px below, 1px `border` under it): one per provider, icon only at 16px (the name when there's no icon), 28px tall, at least 32px wide, rounded 6px, `selected` background on the open one, `hover` on the others. The running agents' providers come first; then, at 45% opacity, those of the other installed agents (Herdr's `knownAgents()`). Tooltip: the provider's name, with "(not running)" on the dimmed ones.
   - The icon at 20px, the provider's name (14px bold) and its plan below (11px `muted`: "Team", "OpenCode Go", "Copilot Business").
   - One card per limit (`raised`, rounded 8px, 10px padding, 6px gaps): the label (semibold) and "38% left" (bold, in the tone colour); a 6px bar rounded 3px, `border` track, filled to the share **used** in the tone colour; below, 11px `muted`, "62% used" and "Resets in 2h 13m" ("in 3d 4h", "in 12m", "in < 1m", "shortly").
   - Antigravity's Claude and GPT model tiers come after the main ones, under an 11px `muted` "Other models".
   - A balance card shows the label and the amount, without a bar.
-  - "No rate limits recorded." when there are none.
+  - "Reading…" while a provider is read for the first time; "Not signed in, or the login has expired." when it was read and nothing was found; "No rate limits recorded." when it has usage but no limits.
   - A last card, when known: today's tokens ("1.2M", "3.4k") and prompts, 15px bold over 11px `muted` "Tokens today" / "Prompts today".
 
 ## How it behaves
@@ -25,14 +26,15 @@ How much quota is left on each AI account your running agents use, at the right 
 - Every 5s it looks at which providers the running agents use, and reads any whose numbers are over 30s old. Agent statuses (working, blocked, done, idle) don't change what it shows: only which providers are running.
 - The provider's own usage endpoints are asked at most every 5 minutes, Anthropic's every 2 minutes (it refuses more often), `agy` and `amp usage` every 5 minutes. A request that never answers holds that source for one such wait. Between them the last answer stands. Today's tokens and prompts come from the agents' local transcripts on every read.
 - A provider that stops answering keeps its last limits for 3 minutes, then they're dropped. Claude's limits stay until their window resets, since Anthropic's endpoint often refuses a read. A limit whose reset time has passed is dropped.
-- Clicking a group opens its popup; Esc or a click outside closes it. The popup follows the same numbers live.
+- Clicking a group opens the popup on its tab; Esc or a click outside closes it. The popup follows the same numbers live.
+- Picking a tab shows it and reads that provider if its numbers are over 30s old. A dimmed (not running) provider is read only then, never in the background.
 - Days are UTC, as the transcripts' timestamps are.
 
 ## Built from
 
 - **One mod**, `mods/herdr-usage/` (`mod.json`: `{ "place": "none", "title": "Usage" }`):
   - `usage.js`: all parsing and display rules, with no Herdr imports, so `node --test` covers it (`test/usage.test.js`, `npm test`). A port of herdr-bridge's `usage.rs`.
-  - `main.js`: reads the sources and draws. Roles by `props()`: none is the status bar groups; `{ sheet: "<provider>" }` is the popup, opened with `openOverlay({ mod: "herdr-usage", kind: "popup", width: 320, height: 420, props: { sheet } })`.
+  - `main.js`: reads the sources and draws. Roles by `props()`: none is the status bar groups; `{ sheet: "<provider>" }` is the popup (its open tab; the popup gets the installed agents from `knownAgents()` in a `cx.spawn` and maps each one's `key`, else `name`, to a provider), opened with `openOverlay({ mod: "herdr-usage", kind: "popup", width: 320, height: 420, props: { sheet } })`.
   - Shared state (`shared`/`setShared`), so every copy and restart sees one cache: `herdr-usage.v1` (`{ [provider]: { at, usage, limitsAt } }`), `herdr-usage.live.v1` (each slow source's last parsed answer), `herdr-usage.reading.v1` (a read in progress). Only parsed numbers and plan names, never a token.
   - Sizing: the groups' `on_size_change` runs `layout.resize { id: "herdr-usage", px }`, with the width divided by `settings().zoom` (the size comes zoomed and the layout zooms px again), only when it changes by 2px or more.
   - A provider is matched from the agent's `app`, then `program.key`, then `program.name` (`agents()`).
@@ -53,7 +55,7 @@ How much quota is left on each AI account your running agents use, at the right 
   | Amp | `amp usage --start … --end …` (credit pools, balance) | its token total |
 
   When a provider gives no limits, another tool's usage file is used if written in the last 3 minutes: `H/.cache/ai-usagebar`, `H/.local/state/omarchy/agents/usage` or `H/.local/state/herdr/usage`, as `<name>/usage.json` or `<name>.json`.
-- **`herdr` functions**: `agents`, `exec` (`sh`, `sqlite3`, `gh`, `agy`, `amp`, `printenv`), `fetch`, `home`, `readTextFile`, `shared`, `setShared`, `settings`, `theme`, `openOverlay`, `props`, `checking`, `run("layout.resize")`.
+- **`herdr` functions**: `agents`, `knownAgents`, `exec` (`sh`, `sqlite3`, `gh`, `agy`, `amp`, `printenv`), `fetch`, `home`, `readTextFile`, `shared`, `setShared`, `settings`, `theme`, `openOverlay`, `props`, `checking`, `run("layout.resize")`.
 - **Art**: none of its own; the agents' icons from Herdr's program table.
 
 ## Watch out
@@ -73,6 +75,7 @@ How much quota is left on each AI account your running agents use, at the right 
 - `herdr-app check mods/herdr-usage` passes, `npm test` passes, and `herdr-app status` shows no errors.
 - With a Claude Code agent running, the status bar's right end shows its icon and "5h N% · 7d N%", matching what's left in `/usage` in Claude Code, with no gap beside the group, at any zoom.
 - An agent of a second provider adds a second group; closing all its agents removes it.
-- Clicking a group opens the popup with each limit's share left and used, its reset time, and today's tokens and prompts.
+- Clicking a group opens the popup on its tab with each limit's share left and used, its reset time, and today's tokens and prompts.
+- The popup's tabs show the running providers, then the other installed agents' dimmed; picking a dimmed one shows "Reading…", then its numbers or "Not signed in, or the login has expired."
 - Over 75% used turns a share amber, over 90% red.
 - No token appears in `shared.json`, and with no OpenCode set up no `opencode.db` is created.
