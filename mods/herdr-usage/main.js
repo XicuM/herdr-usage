@@ -569,7 +569,7 @@ export default class Usage extends View {
         .when(Boolean(state), (el) => el.child(div().text_size(11).text_color(t.dim).child(state))))
       .child(v_flex().flex_1().min_h(0)
         .when(!entry, (el) => el.child(note("Reading…")))
-        .when(Boolean(entry) && !us, (el) => el.child(note(entry.error ? `Read failed: ${entry.error}` : "Not signed in, or the login expired.")))
+        .when(Boolean(entry) && !us, (el) => el.child(note(entry.error ? `Read failed: ${entry.error}` : p === "pi" || p === "opencode" ? "No usage recorded yet." : "Not signed in, or the login expired.")))
         .when(Boolean(us) && !limits.length && !us.spend, (el) => el.child(note("No rate limits recorded.")))
         .children(limits.map(row))
         // A usage-limit reset Claude or Codex offers, when one is left.
