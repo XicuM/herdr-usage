@@ -49,7 +49,7 @@ How much quota is left on each AI account your running agents use, at the right 
 - **The layout**: in the person's personal layout, the `status` block becomes a row `status-row` (28px) of `status` (`workspace-status`, weight 1) and a block `herdr-usage` (`{ mod: "herdr-usage" }`, any px; the mod sizes it). On one of Herdr's own layouts, `layout.clone` first.
 - **Where each provider's numbers come from** (`H` is the home folder):
 
-  | Provider | Limits | Today's tokens and prompts |
+  | Provider | Limits | Tokens, prompts and spend |
   | --- | --- | --- |
   | Claude | `claude` CLI `get_usage`; else `H/.claude/.credentials.json` → `api.anthropic.com/api/oauth/usage` | `H/.claude/projects/**/*.jsonl` |
   | Codex | `codex app-server` `account/rateLimits/read`; else `H/.codex/auth.json` → `chatgpt.com/backend-api/wham/usage`, else its logs | `H/.codex/sessions/**/*.jsonl` |

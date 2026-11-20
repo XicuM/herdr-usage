@@ -412,7 +412,9 @@ export default class Usage extends View {
       }
       const all = shared(KEY) ?? {};
       const merged = u.merge(all[p], fresh);
-      const entry = fresh ? { ...merged, failed: false } : { ...merged, failed: true, ...(error && { error }) };
+      // A read that returns no limits while the last one had them is a failure too: the old ones stay, dimmed.
+      const failed = !fresh || (!fresh.spend && !fresh.limits?.length && Boolean(all[p]?.limitsAt));
+      const entry = { ...merged, failed, ...(error && { error }) };
       setShared(KEY, { ...all, [p]: entry });
       setShared(READING, { ...shared(READING), [p]: 0 });
     });
