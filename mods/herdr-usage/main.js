@@ -177,8 +177,10 @@ async function readOpencode() {
   const db = H(".local/share/opencode/opencode.db");
   let limits = await live("opencode", u.NET_TTL, async () => {
     // Read-only: sqlite3 would otherwise create an empty database where OpenCode has none.
+    const authPath = await env("HERDR_USAGE_OPENCODE_GO_AUTH");
     const key = (await env("HERDR_USAGE_OPENCODE_GO_KEY")) || u.opencodeKey(
       await run("sqlite3", ["-readonly", db, "select value from credential where integration_id='opencode-go' and active=1 limit 1;"]),
+      ...(authPath ? [await read(authPath)] : []),
       await read(H(".local/share/opencode/auth.json")),
       await read(H(".config/opencode/auth.json")),
       await read(H(".pi/agent/auth.json")),
