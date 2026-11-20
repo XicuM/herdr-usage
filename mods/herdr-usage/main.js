@@ -284,6 +284,10 @@ function tabsFor(installed) {
   ];
 }
 
+/** A popup row's height: a line of text and a 3px bar 5px under it, with about 11px above and below, so rows
+ *  stand clearly apart and each bar reads as its own label's. */
+const ROW = 46;
+
 /** The layout block this mod sits in. It sizes it to its text, so it reads as part of the status bar. */
 const BLOCK = "herdr-usage";
 
@@ -398,12 +402,12 @@ export default class Usage extends View {
   }
 
   // The popup on provider p's tab, sized for the tab that shows the most rows, so no tab scrolls or is cut off.
-  // Every part has a fixed height: 5px padding twice, the 24px title, 36px rows, today's line (a 9px divider and
+  // Every part has a fixed height: 5px padding twice, the 24px title, ROW-tall rows, today's line (a 9px divider and
   // 28px) and, with several tabs, the tab row (a 9px divider and 31px).
   open(p) {
     const tabs = tabsFor(this.installed);
     const rows = Math.max(...tabs.map((x) => u.ROWS[x.p] ?? 1), u.ROWS[p] ?? 1);
-    const height = 10 + 24 + 36 * rows + 37 + (tabs.length > 1 ? 40 : 0);
+    const height = 10 + 24 + ROW * rows + 37 + (tabs.length > 1 ? 40 : 0);
     openOverlay({ mod: "herdr-usage", kind: "popup", width: 280, height, props: { sheet: p, installed: this.installed } });
   }
 
@@ -416,9 +420,9 @@ export default class Usage extends View {
     // popup was sized for.
     const other = u.otherModels((us?.limits ?? []).filter((l) => l.primary === false));
     const limits = [...u.primary(us?.limits).slice(0, (u.ROWS[p] ?? 1) - (other ? 1 : 0)), ...(other ? [other] : [])];
-    const note = (text) => h_flex().h(36).px(8).items_center().text_color(t.dim).child(div().min_w(0).truncate().child(text));
+    const note = (text) => h_flex().h(ROW).px(8).items_center().text_color(t.dim).child(div().min_w(0).truncate().child(text));
     const divider = () => div().mx(7).my(4).h(1).flex_none().bg(t.border);
-    // A limit, 36px: its label, its detail ("12 of 300") and when it resets, and the share left, on one line; a
+    // A limit, ROW tall: its label, its detail ("12 of 300") and when it resets, and the share left, on one line; a
     // 3px bar of the share left under it, draining as it's used. A balance (a `title`, no share) is the line alone.
     const row = (l) => {
       const used = Math.min(Math.max(l.percent, 0), 1);
@@ -433,7 +437,7 @@ export default class Usage extends View {
           : h_flex().flex_none().gap(3).items_baseline()
             .child(div().text_color(color).child(`${Math.round((1 - used) * 100)}%`))
             .child(div().text_size(11).text_color(t.dim).child("left")));
-      return v_flex().h(36).px(8).gap(5).justify_center().flex_none().child(line)
+      return v_flex().h(ROW).px(8).gap(5).justify_center().flex_none().child(line)
         .when(!l.title, (el) => el.child(div().w_full().h(3).rounded(2).bg(t.border).child(div().h_full().rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))));
     };
     const today = [
