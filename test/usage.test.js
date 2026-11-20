@@ -9,7 +9,7 @@ const lines = (xs) => xs.map((x) => JSON.stringify(x));
 test("providerOf maps agent names and apps", () => {
   assert.equal(u.providerOf("claude-code"), "claude");
   assert.equal(u.providerOf("Codex"), "codex");
-  assert.equal(u.providerOf("pi"), null);
+  assert.equal(u.providerOf("pi"), "pi");
 });
 
 // usage.rs: claude_counts_today_once_per_message
@@ -33,10 +33,34 @@ test("claude login reads the plan without its prefix", () => {
 
 test("claude limits from the endpoint, none from an error", () => {
   assert.deepEqual(u.claudeLimits({ five_hour: { utilization: 42, resets_at: "2999-01-01T00:00:00+00:00" }, seven_day: { utilization: 7 } }), [
-    { label: "Session (5-hour)", percent: 0.42, resets_at: "2999-01-01T00:00:00+00:00" },
-    { label: "Weekly (7-day)", percent: 0.07, resets_at: null },
+    { label: "Session (5-hour)", percent: 0.42, resets_at: "2999-01-01T00:00:00+00:00", duration_s: 18000 },
+    { label: "Weekly (7-day)", percent: 0.07, resets_at: null, duration_s: 604800 },
   ]);
   assert.equal(u.claudeLimits({ type: "error", error: { type: "rate_limit_error" } }), null);
+});
+
+test("claude keeps scoped per-model weekly limits", () => {
+  const limits = u.claudeLimits({ limits: [
+    { kind: "session", percent: 20, resets_at: "2999-01-01T00:00:00Z" },
+    { kind: "weekly_all", percent: 30, resets_at: "2999-01-01T00:00:00Z" },
+    { kind: "weekly_scoped", percent: 80, resets_at: "2999-01-01T00:00:00Z", scope: { model: { display_name: "Opus" } } },
+  ] });
+  assert.deepEqual(limits.map((l) => [l.label, l.percent, l.duration_s]), [
+    ["Session (5-hour)", 0.2, 18000], ["Weekly (7-day)", 0.3, 604800], ["Weekly · Opus", 0.8, 604800],
+  ]);
+  assert.equal(u.shortLabel("Weekly · Opus"), "7d Opus");
+  assert.equal(u.longLabel("Weekly · Opus"), "Weekly · Opus");
+});
+
+test("claude CLI get_usage reply becomes plan and limits", () => {
+  const reply = JSON.stringify({ type: "control_response", response: { subtype: "success", response: {
+    subscription_type: "claude_max",
+    rate_limits: { limits: [{ kind: "session", percent: 25, resets_at: "2999-01-01T00:00:00Z" }] },
+  } } });
+  assert.deepEqual(u.claudeCli(reply), {
+    plan: "Max", limits: [{ label: "Session (5-hour)", percent: 0.25, resets_at: "2999-01-01T00:00:00Z", duration_s: 18000 }],
+  });
+  assert.equal(u.claudeCli('{"type":"control_response","response":{"subtype":"error"}}'), null);
 });
 
 // usage.rs: codex_reports_its_rate_limits
@@ -53,9 +77,37 @@ test("codex reports its rate limits", () => {
   assert.equal(got.prompts, 1);
   assert.equal(got.model, "gpt-5");
   assert.deepEqual(u.codexLimits(got.logLimits), [
-    { label: "5-hour window", percent: 0.42, resets_at: "2027-01-15T08:00:00Z" },
-    { label: "Weekly (7-day)", percent: 0.07, resets_at: null },
+    { label: "5-hour window", percent: 0.42, resets_at: "2027-01-15T08:00:00Z", duration_s: 18000 },
+    { label: "Weekly (7-day)", percent: 0.07, resets_at: null, duration_s: 604800 },
   ]);
+});
+
+test("codex keeps its per-model limit groups", () => {
+  const limits = u.codexLimits({
+    codex: { primary: { used_percent: 10, window_minutes: 300, resets_at: 1_800_000_000 } },
+    "gpt-5-codex": { limit_name: "GPT-5 Codex", primary: { used_percent: 40, window_minutes: 10080 } },
+  });
+  assert.deepEqual(limits.map((l) => [l.label, l.percent]), [
+    ["5-hour window", 0.1], ["Weekly · GPT-5 Codex", 0.4],
+  ]);
+});
+
+test("codex app-server RPC reply becomes plan and per-model windows", () => {
+  const reply = JSON.stringify({ jsonrpc: "2.0", id: 2, result: {
+    rateLimits: { limitId: "codex", planType: "plus", primary: { usedPercent: 50, windowDurationMins: 300, resetsAt: 1_800_000_000 } },
+    rateLimitsByLimitId: {
+      codex: { limitId: "codex", planType: "plus", primary: { usedPercent: 50, windowDurationMins: 300, resetsAt: 1_800_000_000 } },
+      other: { limitId: "other", limitName: "Other", primary: { usedPercent: 20, windowDurationMins: 10080 } },
+    },
+  } });
+  const r = u.codexRpc(reply);
+  assert.equal(r.plan, "Plus");
+  assert.deepEqual(u.codexLimits(r.windows).map((l) => [l.label, l.percent]), [
+    ["5-hour window", 0.5], ["Weekly · Other", 0.2],
+  ]);
+  const snapshot = JSON.stringify({ snapshot: { payload: { rate_limits: { limit_id: "codex", plan_type: "pro",
+    primary: { used_percent: 12, window_minutes: 300 } } } } });
+  assert.deepEqual(u.codexLimits(u.codexRpc(snapshot).windows).map((l) => l.percent), [0.12]);
 });
 
 test("codex sums each session's last total", () => {
@@ -67,26 +119,30 @@ test("codex sums each session's last total", () => {
 test("codex live answer becomes windows", () => {
   const live = u.codexLive({ plan_type: "plus", rate_limit: { primary_window: { used_percent: 50, limit_window_seconds: 18000, reset_at: 1_800_000_000 } } });
   assert.equal(live.plan, "Plus");
-  assert.deepEqual(u.codexLimits(live.windows), [{ label: "5-hour window", percent: 0.5, resets_at: "2027-01-15T08:00:00Z" }]);
+  assert.deepEqual(u.codexLimits(live.windows), [{ label: "5-hour window", percent: 0.5, resets_at: "2027-01-15T08:00:00Z", duration_s: 18000 }]);
   assert.equal(u.codexLive({ detail: "Unauthorized" }), null);
 });
 
 // usage.rs: claudes_limits_outlive_a_refused_read
-test("a refused read keeps the last limits; only Claude's outlive STALE", () => {
+test("a refused read keeps the last limits, marked stale when old", () => {
   const limits = [{ label: "Session (5-hour)", percent: 0.25, resets_at: "2999-01-01T00:00:00+00:00" }];
   const t = 1_000_000;
   const old = { at: t, usage: { tier_label: null, limits, today_tokens: 1, today_prompts: 1 }, limitsAt: t };
   const merged = u.merge(old, { tier_label: null, limits: [], today_tokens: 2, today_prompts: 2 }, t + 60_000);
   assert.equal(merged.limitsAt, t);
   assert.equal(merged.usage.today_tokens, 2);
-  const later = t + u.STALE + 1;
-  assert.equal(u.shown(merged, "claude", later).limits.length, 1);
-  assert.equal(u.shown(merged, "codex", later).limits.length, 0);
+  assert.equal(u.shown(merged, "claude", t + 60_000).limits.length, 1);
+  const later = merged.at + u.STALE + 1;
+  assert.equal(u.shown(merged, "claude", later).stale, true);
+  assert.equal(u.shown(merged, "codex", later).limits.length, 1);
 });
 
-test("a limit whose window has reset isn't shown", () => {
-  const entry = { at: 0, limitsAt: Date.now(), usage: { limits: [{ label: "x", percent: 0.5, resets_at: "2000-01-01T00:00:00Z" }] } };
-  assert.equal(u.shown(entry, "claude").limits.length, 0);
+test("a limit whose window has reset is shown as expired, never as 0%", () => {
+  const entry = { at: Date.now(), limitsAt: Date.now(), usage: { limits: [{ label: "x", percent: 0.5, resets_at: "2000-01-01T00:00:00Z" }] } };
+  const limits = u.shown(entry, "claude").limits;
+  assert.equal(limits.length, 1);
+  assert.equal(limits[0].expired, true);
+  assert.equal(u.highestPercent(limits), null);
 });
 
 test("short labels for the status bar", () => {
@@ -136,8 +192,8 @@ test("antigravity keeps its Claude and GPT tiers out of the headline", () => {
     { name: "Claude Models", buckets: [{ name: "Session", remaining_fraction: 0 }] },
   ] } } });
   assert.deepEqual(probe, [
-    { label: "Session (5-hour)", percent: 0.75, resets_at: "2999-01-01T00:00:00Z", primary: true },
-    { label: "Weekly (7-day)", percent: 0.3, resets_at: null, primary: true },
+    { label: "Session (5-hour)", percent: 0.75, resets_at: "2999-01-01T00:00:00Z", duration_s: 18000, primary: true },
+    { label: "Weekly (7-day)", percent: 0.3, resets_at: null, duration_s: 604800, primary: true },
     { label: "Claude Models Session", percent: 1, resets_at: null, primary: false },
   ]);
 });
@@ -216,7 +272,8 @@ test("claude extra usage, codex credits, opencode stats, today's cost, the bar's
     { label: "Extra usage", percent: 0.25, detail: "12.30 USD of 50.00 USD", bar: false });
   assert.equal(u.codexCredits({ has_credits: false, unlimited: false, balance: "0" }), null);
   assert.deepEqual(u.codexCredits({ has_credits: true, unlimited: false, balance: "120" }), { label: "Credits", percent: 0, title: "120 left", bar: false });
-  assert.deepEqual(u.opencodeStats("3|1200|0.25\n", "1|300|0", null), { prompts: 4, tokens: 1500, cost: 0.25 });
+  assert.deepEqual(u.opencodeStats("3|1200|0.25\n", "1|300|0", null), { prompts: 4, tokens: 1500, cost: 0.25, week_prompts: 0, week_tokens: 0, week_cost: 0 });
+  assert.deepEqual(u.opencodeStats("2|100|0.1|9|900|0.9\n"), { prompts: 2, tokens: 100, cost: 0.1, week_prompts: 9, week_tokens: 900, week_cost: 0.9 });
   assert.equal(u.usage({ plan: "Pro", limits: [], cost: 0 }).today_cost, undefined);
   assert.equal(u.usage({ plan: "Pro", limits: [], cost: 2.5 }).today_cost, 2.5);
   const limits = [{ label: "5-hour", percent: 0.1 }, { label: "Extra usage", percent: 0.2, bar: false }, { label: "Other", percent: 0, primary: false }];
@@ -249,9 +306,36 @@ test("limit resets, OpenCode's status, OpenRouter's weekly spend", () => {
   assert.equal(u.resetNote(null), null);
   assert.equal(u.usage({ plan: "Team", limits: [], reset: { count: 1 } }).reset_note, "1 limit reset available");
   assert.deepEqual(u.opencodeLimits({ weekly: { percent: 14, resetsAt: "w", status: "ok" }, monthly: { percent: 100, resetsAt: "m", status: "rate-limited" } }),
-    [{ label: "Weekly", percent: 0.14, resets_at: "w" }, { label: "Monthly", percent: 1, resets_at: "m", status: "rate-limited" }]);
+    [{ label: "Weekly", percent: 0.14, resets_at: "w", duration_s: 604800 }, { label: "Monthly", percent: 1, resets_at: "m", status: "rate-limited" }]);
   const r = u.openrouterParse({ data: { usage: 1, usage_daily: 0.5, usage_weekly: 3, usage_monthly: 12 } });
   assert.deepEqual([r.cost, r.week, r.month], [0.5, 3, 12]);
   const spent = u.usage({ plan: "OpenRouter", limits: [], week: 3, month: 12 });
   assert.deepEqual([spent.week_cost, spent.month_cost], [3, 12]);
+});
+
+test("pace compares the share used with the share of the window gone", () => {
+  const now = Date.parse("2026-11-20T10:00:00Z");
+  const limit = { percent: 0.8, duration_s: 5 * 3600, resets_at: "2026-11-20T11:40:00Z" };
+  const p = u.pace(limit, now);
+  assert.equal(Math.round(p.elapsed * 100), 67);
+  assert.equal(Math.round(p.left * 100), 33);
+  assert.equal(p.verdict, "ahead");
+  assert.match(u.paceText(limit, now), /33% of the window left/);
+  assert.equal(u.pace({ percent: 0.1, label: "Monthly", resets_at: "2026-12-01T00:00:00Z" }, now), null);
+  assert.equal(u.durationOf({ label: "Weekly · Opus" }), 604800);
+});
+
+test("Pi tokens and prompts come from its own messages, today and over 7 days", () => {
+  const day = "2026-11-20";
+  const week = "2026-11-17";
+  const lines = [
+    { type: "message", timestamp: `${day}T10:00:00.000Z`, message: { role: "user" } },
+    { type: "message", timestamp: `${day}T10:00:02.000Z`, message: { role: "assistant", model: "demo-model", usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, totalTokens: 18 } } },
+    { type: "message", timestamp: `${week}T09:00:00.000Z`, message: { role: "assistant", usage: { input: 100, output: 20, cacheRead: 0, cacheWrite: 0 } } },
+    { type: "message", timestamp: "2026-11-01T09:00:00.000Z", message: { role: "assistant", usage: { totalTokens: 999 } } },
+  ].map((x) => JSON.stringify(x));
+  assert.deepEqual(u.piStats(lines, day, Date.parse(`${week}T00:00:00Z`)),
+    { today_tokens: 18, today_prompts: 1, week_tokens: 138, week_prompts: 1, model: "demo-model" });
+  assert.deepEqual(u.usage({ plan: "Pi", limits: [], tokens: 18, prompts: 1, week_tokens: 138, week_prompts: 1, spend: true }),
+    { tier_label: "Pi", limits: [], today_tokens: 18, today_prompts: 1, week_tokens: 138, week_prompts: 1, spend: true });
 });
