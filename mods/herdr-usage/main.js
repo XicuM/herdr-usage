@@ -296,7 +296,11 @@ export default class Usage extends View {
   init(_props, cx) {
     this.sheetFor = props()?.sheet ?? null;
     if (checking()) return;
-    if (this.sheetFor) return;
+    if (this.sheetFor) {
+      // Redraw as the bar's reads land in shared state: the popup has no reads of its own to wait on.
+      cx.timer.every(2_000, (cx) => cx.notify());
+      return;
+    }
     // The installed agents' providers, for the popup's dimmed tabs, known before it opens so it can be sized
     // for them. Herdr checks at most once a minute.
     this.installed = [];
