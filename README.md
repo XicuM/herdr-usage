@@ -55,7 +55,7 @@ The mod sizes its own block to its text. Copy the mod, don't symlink it: Herdr w
 - `curl`-equivalent `fetch` requests to the usage endpoints above, at most every 5 minutes (Anthropic's fallback every 2 minutes).
 - `sh`, `find`, `grep` and `sqlite3` to read transcripts and local databases read-only. `sqlite3` is always `-readonly`, so it never creates an empty `opencode.db`.
 - `agy` every 5 minutes while Antigravity is running, from `/`, so no project's MCP servers or instructions load. `amp usage` every 5 minutes. `gh auth token` only when no Copilot token file exists.
-- It reads the conversation in the focused providers' transcripts and local databases, but passes on numbers only (counts, tokens, times, model ids).
+- It reads the agents' transcripts and local databases, but passes on numbers only (counts, tokens, times, model ids).
 - Environment overrides: `HERDR_USAGE_CLAUDE_BIN`, `HERDR_USAGE_CODEX_BIN`, `HERDR_USAGE_OPENCODE_GO_KEY`, `HERDR_USAGE_OPENCODE_GO_ORG`, `HERDR_USAGE_OPENCODE_GO_AUTH`.
 
 Note: `get_usage` and `account/rateLimits/read` are internal interfaces, and several fallback endpoints are undocumented. They can change without notice. The CLI path is used first where it works.
