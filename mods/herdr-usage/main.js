@@ -348,9 +348,9 @@ export default class Usage extends View {
     const t = theme();
     if (this.sheetFor) return this.sheet(t);
     // One group per provider, "Claude 5h 75% · 7d 19%": the share left, coloured by the share used; a balance as its amount.
-    const groups = providers().map((p, gi) => {
+    const groups = providers().map((p) => {
       const limits = u.onBar(u.shown(shared(KEY)?.[p], p)?.limits);
-      const pic = icon(agents().find((a) => provider(a) === p)?.program, 13, t.muted);
+      const pic = icon(agents().find((a) => provider(a) === p)?.program, 13, t.muted)?.mr(4);
       const parts = limits.flatMap((l, i) => {
         const used = Math.min(Math.max(l.percent, 0), 1);
         return [
@@ -371,7 +371,6 @@ export default class Usage extends View {
         .hover((s) => s.bg(t.hover))
         .tooltip(`${u.NAMES[p]}: quota left; click for details`)
         .on_click(() => this.open(p))
-        .when(gi > 0, (el) => el.ml(6))
         // The agent's icon, as herdr-mobile shows it; its name only when it has none.
         .child(pic ?? div().text_color(t.foreground).child(u.NAMES[p]))
         .when(!parts.length, (el) => el.child(div().text_color(t.dim).child("–")))
@@ -387,7 +386,8 @@ export default class Usage extends View {
         .pr(8)
         .items_center()
         .when(groups.length > 0, (el) => el.border_l(1).border_color(t.border))
-        .children(groups)
+        // The bar's own 1px border line, between the groups.
+        .children(groups.flatMap((g, i) => (i ? [div().w(1).h_full().flex_none().mx(5).bg(t.border), g] : [g])))
         .on_size_change((size, cx) => this.fit(size.width, cx)));
   }
 
