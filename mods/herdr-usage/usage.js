@@ -200,7 +200,7 @@ export function codexLive(resp) {
     resets_at: w?.reset_at,
   });
   const plan = typeof resp.plan_type === "string" ? capital(resp.plan_type) : null;
-  return { plan, windows: { primary: window(rl.primary_window), secondary: window(rl.secondary_window) }, credits: resp.credits ?? null };
+  return { plan, windows: { primary: window(rl.primary_window), secondary: window(rl.secondary_window) }, credits: resp.credits ?? null, reset: codexReset(resp) };
 }
 
 /** Codex's credits (from its usage endpoint or its logs), when it has any: popup only, not the bar. */
@@ -382,10 +382,14 @@ export function opencodeKey(dbOut, authText) {
   return typeof key === "string" ? key : parse(authText ?? "")?.["opencode-go"]?.key ?? null;
 }
 
-/** The three windows of `GET /zen/go/v1/usage`: a rolling 5-hour, a weekly and a monthly budget. */
+/** The three windows of `GET /zen/go/v1/usage`: a rolling 5-hour, a weekly and a monthly budget. A window the
+ *  provider calls `rate-limited` says so on its row. */
 export function opencodeLimits(usage) {
-  return [["rolling", "5-hour"], ["weekly", "Weekly"], ["monthly", "Monthly"]].flatMap(([key, label]) =>
-    typeof usage?.[key]?.percent === "number" ? [{ label, percent: usage[key].percent / 100, resets_at: usage[key].resetsAt ?? null }] : []);
+  return [["rolling", "5-hour"], ["weekly", "Weekly"], ["monthly", "Monthly"]].flatMap(([key, label]) => {
+    const w = usage?.[key];
+    if (typeof w?.percent !== "number") return [];
+    return [{ label, percent: w.percent / 100, resets_at: w.resetsAt ?? null, ...(w.status && w.status !== "ok" && { status: w.status }) }];
+  });
 }
 
 // --- Copilot, Cursor, OpenRouter, DeepSeek -------------------------------------------------
@@ -417,6 +421,40 @@ export function copilotUser(resp) {
   const plan = /free/.test(resp.access_type_sku ?? "") ? "free" : resp.copilot_plan;
   return { plan: typeof plan === "string" ? `Copilot ${capital(plan)}` : "Copilot", limits };
 }
+// --- Limit resets (Claude, Codex) ----------------------------------------------------------
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** "22 Oct", in UTC as the agents' days are: by hand, since Herdr's runtime has no Intl. */
+const day = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+};
+
+/** The usage-limit resets Claude offers (its "one usage-limit reset" campaigns), with how many are left and
+ *  the earliest expiry, or null. Anthropic keeps them under a codename, `cedar_ember`, one grant per campaign. */
+export function claudeReset(resp, now = Date.now()) {
+  const grants = resp?.cedar_ember?.grants;
+  if (!Array.isArray(grants)) return null;
+  const live = grants.filter((g) => typeof g?.resets_left === "number" && g.resets_left > 0
+    && (!g.ends_at || Date.parse(g.ends_at) > now));
+  if (!live.length) return null;
+  const ends = live.map((g) => Date.parse(g.ends_at)).filter(Number.isFinite);
+  return { count: live.reduce((n, g) => n + g.resets_left, 0), until: ends.length ? new Date(Math.min(...ends)).toISOString() : null };
+}
+
+/** The manual rate-limit resets Codex has left (`rate_limit_reset_credits`), or null. */
+export function codexReset(resp) {
+  const n = resp?.rate_limit_reset_credits?.available_count;
+  return typeof n === "number" && n > 0 ? { count: n } : null;
+}
+
+/** A reset line for the popup: "1 limit reset available · expires 22 Oct", or null. */
+export function resetNote(reset) {
+  if (!reset?.count) return null;
+  const until = reset.until && day(reset.until);
+  return `${reset.count} limit reset${reset.count === 1 ? "" : "s"} available${until ? ` · expires ${until}` : ""}`;
+}
+
 /** Another tool's usage file may list the token's expiry, which usage.rs called a "Session Token" limit: not a quota. */
 export const noSessionToken = (limits) => (limits ?? []).filter((l) => l.label !== "Session Token");
 
@@ -455,7 +493,9 @@ export function openrouterParse(resp, credits) {
     limits.push({ label: "Balance", percent: 0, title: `$${(c.total_credits - c.total_usage).toFixed(2)}` });
   }
   // Not the key's `label`: it's often the key itself, shortened ("sk-or-v1-0e6…").
-  return { plan: "OpenRouter", limits, cost: typeof data.usage_daily === "number" ? data.usage_daily : null };
+  return { plan: "OpenRouter", limits, cost: typeof data.usage_daily === "number" ? data.usage_daily : null,
+    ...(typeof data.usage_weekly === "number" && { week: data.usage_weekly }),
+    ...(typeof data.usage_monthly === "number" && { month: data.usage_monthly }) };
 }
 
 /** DeepSeek's balance: shown as a `title`, since a balance has no share used. */
@@ -507,15 +547,20 @@ export function ampParse(text) {
 // --- All -----------------------------------------------------------------------------------
 
 /** One agent's usage, or null when there is nothing to say. Tokens and prompts only where known. */
-export function usage({ plan, model, limits, tokens, prompts, cost }) {
+export function usage({ plan, model, limits, tokens, prompts, cost, week, month, reset }) {
   if (!tokens && !prompts && !limits?.length && !plan && !model) return null;
+  const reset_note = resetNote(reset);
   return {
     tier_label: plan ?? model ?? null,
     limits: limits ?? [],
+    ...(reset_note && { reset_note }),
     ...(tokens != null && { today_tokens: tokens }),
     ...(prompts != null && { today_prompts: prompts }),
     // Dollars spent today, where the source records it and it's more than nothing (subscriptions record 0).
     ...(cost > 0 && { today_cost: cost }),
+    // OpenRouter's spend this week and this month, beside today's.
+    ...(week > 0 && { week_cost: week }),
+    ...(month > 0 && { month_cost: month }),
   };
 }
 

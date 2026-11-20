@@ -89,11 +89,11 @@ async function readClaude() {
     });
     // Null when it refused: the cached limits stand. Extra usage after the windows, when it's on.
     const limits = u.claudeLimits(resp);
-    return { plan: login?.plan ?? null, limits: limits && [...limits, ...[u.claudeExtra(resp)].filter(Boolean)] };
+    return { plan: login?.plan ?? null, limits: limits && [...limits, ...[u.claudeExtra(resp)].filter(Boolean)], reset: u.claudeReset(resp) };
   });
   const c = l?.limits ? null : u.claudeCache(await cached("claude"));
   const s = u.claudeStats(await lines(CLAUDE_LINES, [H(".claude/projects"), today]), today);
-  return u.usage({ plan: l?.plan ?? c?.plan, model: s.model, limits: l?.limits ?? c?.limits ?? [], tokens: s.tokens, prompts: s.prompts });
+  return u.usage({ plan: l?.plan ?? c?.plan, model: s.model, limits: l?.limits ?? c?.limits ?? [], tokens: s.tokens, prompts: s.prompts, reset: l?.reset });
 }
 
 async function readCodex() {
@@ -121,7 +121,7 @@ async function readCodex() {
   }
   const credits = u.codexCredits(l?.credits ?? s.logLimits?.credits);
   if (credits) limits = [...limits, credits];
-  return u.usage({ plan, model: s.model, limits, tokens: s.tokens, prompts: s.prompts });
+  return u.usage({ plan, model: s.model, limits, tokens: s.tokens, prompts: s.prompts, reset: l?.reset });
 }
 
 async function readAntigravity() {
@@ -237,7 +237,7 @@ async function readOpenrouter() {
     return key && u.openrouterParse(await getJson("https://openrouter.ai/api/v1/auth/key", auth), await getJson("https://openrouter.ai/api/v1/credits", auth));
   });
   if (!r) r = u.genericCache(await cached("openrouter"));
-  return r && (r.plan || r.limits.length) ? u.usage({ plan: r.plan ?? "OpenRouter", limits: r.limits, cost: r.cost }) : null;
+  return r && (r.plan || r.limits.length) ? u.usage({ plan: r.plan ?? "OpenRouter", limits: r.limits, cost: r.cost, week: r.week, month: r.month }) : null;
 }
 
 async function readDeepseek() {
@@ -402,12 +402,13 @@ export default class Usage extends View {
   }
 
   // The popup on provider p's tab, sized for the tab that shows the most rows, so no tab scrolls or is cut off.
-  // Every part has a fixed height: 5px padding twice, the 24px title, ROW-tall rows, today's line (a 9px divider and
-  // 28px) and, with several tabs, the tab row (a 9px divider and 31px).
+  // Every part has a fixed height: 5px padding twice, the 24px title, ROW-tall rows, the reset line when there is
+  // one (a 9px divider and 28px), today's line (the same) and, with several tabs, the tab row (a 9px divider and 31px).
   open(p) {
     const tabs = tabsFor(this.installed);
     const rows = Math.max(...tabs.map((x) => u.ROWS[x.p] ?? 1), u.ROWS[p] ?? 1);
-    const height = 10 + 24 + ROW * rows + 37 + (tabs.length > 1 ? 40 : 0);
+    const reset = tabs.some((x) => u.shown(shared(KEY)?.[x.p], x.p)?.reset_note) ? 37 : 0;
+    const height = 10 + 24 + ROW * rows + reset + 37 + (tabs.length > 1 ? 40 : 0);
     openOverlay({ mod: "herdr-usage", kind: "popup", width: 280, height, props: { sheet: p, installed: this.installed } });
   }
 
@@ -427,7 +428,7 @@ export default class Usage extends View {
     const row = (l) => {
       const used = Math.min(Math.max(l.percent, 0), 1);
       const color = t[u.tone(used)] ?? t.muted;
-      const detail = [l.detail, l.resets_at && `resets ${u.resetsIn(l.resets_at)}`].filter(Boolean).join(" · ");
+      const detail = [l.status, l.detail, l.resets_at && `resets ${u.resetsIn(l.resets_at)}`].filter(Boolean).join(" · ");
       const line = h_flex().gap(8).items_center()
         .child(div().min_w(0).truncate().text_color(t.foreground).child(u.longLabel(l.label)))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(detail))
@@ -444,6 +445,8 @@ export default class Usage extends View {
       us?.today_tokens != null && `${u.formatTokens(us.today_tokens)} tokens`,
       us?.today_prompts != null && `${us.today_prompts} prompts`,
       us?.today_cost > 0 && `$${us.today_cost.toFixed(2)}`,
+      us?.week_cost > 0 && `week $${us.week_cost.toFixed(2)}`,
+      us?.month_cost > 0 && `month $${us.month_cost.toFixed(2)}`,
     ].filter(Boolean);
     return v_flex()
       .size_full()
@@ -459,6 +462,8 @@ export default class Usage extends View {
         .when(Boolean(entry) && !us, (el) => el.child(note("Not signed in, or the login expired.")))
         .when(Boolean(us) && !limits.length, (el) => el.child(note("No rate limits recorded.")))
         .children(limits.map(row))
+        // A usage-limit reset Claude or Codex offers, when one is left.
+        .when(Boolean(us?.reset_note), (el) => el.child(divider()).child(h_flex().px(8).h(28).items_center().text_size(11).text_color(t.dim).child(us.reset_note)))
         .when(today.length > 0, (el) => el.child(divider()).child(h_flex().px(8).h(28).items_center().text_size(11).text_color(t.dim).child(`Today: ${today.join(" · ")}`))))
       // One tab per provider, at the bottom: the running ones, then the other installed agents', dimmed.
       .when(tabs.length > 1, (el) => el.child(divider()).child(h_flex().gap(2).flex_none()

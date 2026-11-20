@@ -233,3 +233,25 @@ test("popup labels, and Antigravity's Claude and GPT tiers as one row", () => {
     { label: "Claude and GPT models Weekly Limit Remaining", percent: 0.1, resets_at: "b", primary: false },
   ]), { label: "Claude & GPT", percent: 0.2, resets_at: "a", detail: "5h 80% · 7d 90%" });
 });
+
+test("limit resets, OpenCode's status, OpenRouter's weekly spend", () => {
+  const resp = { cedar_ember: { grants: [
+    { resets_left: 1, ends_at: "2026-10-22T16:00:00+00:00" },
+    { resets_left: 0, ends_at: "2027-01-01T00:00:00+00:00" },
+  ] } };
+  assert.deepEqual(u.claudeReset(resp, Date.parse("2026-09-30T00:00:00Z")), { count: 1, until: "2026-10-22T16:00:00.000Z" });
+  assert.equal(u.claudeReset(resp, Date.parse("2026-11-01T00:00:00Z")), null);
+  assert.equal(u.claudeReset(null), null);
+  assert.deepEqual(u.codexReset({ rate_limit_reset_credits: { available_count: 2 } }), { count: 2 });
+  assert.equal(u.codexReset({ rate_limit_reset_credits: { available_count: 0 } }), null);
+  assert.equal(u.resetNote({ count: 1, until: "2026-10-22T16:00:00Z" }), "1 limit reset available · expires 22 Oct");
+  assert.equal(u.resetNote({ count: 2 }), "2 limit resets available");
+  assert.equal(u.resetNote(null), null);
+  assert.equal(u.usage({ plan: "Team", limits: [], reset: { count: 1 } }).reset_note, "1 limit reset available");
+  assert.deepEqual(u.opencodeLimits({ weekly: { percent: 14, resetsAt: "w", status: "ok" }, monthly: { percent: 100, resetsAt: "m", status: "rate-limited" } }),
+    [{ label: "Weekly", percent: 0.14, resets_at: "w" }, { label: "Monthly", percent: 1, resets_at: "m", status: "rate-limited" }]);
+  const r = u.openrouterParse({ data: { usage: 1, usage_daily: 0.5, usage_weekly: 3, usage_monthly: 12 } });
+  assert.deepEqual([r.cost, r.week, r.month], [0.5, 3, 12]);
+  const spent = u.usage({ plan: "OpenRouter", limits: [], week: 3, month: 12 });
+  assert.deepEqual([spent.week_cost, spent.month_cost], [3, 12]);
+});
