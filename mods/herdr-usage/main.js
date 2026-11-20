@@ -549,8 +549,8 @@ export default class Usage extends View {
       us?.week_cost > 0 && `week $${us.week_cost.toFixed(2)}`,
       us?.month_cost > 0 && `month $${us.month_cost.toFixed(2)}`,
     ].filter(Boolean);
-    const age = entry?.at ? u.ago(entry.at) : null;
-    const state = entry?.failed ? `last reading ${age}` : age ? `updated ${age}` : null;
+    const age = entry?.failed && entry.limitsAt ? u.ago(entry.limitsAt) : entry?.at ? u.ago(entry.at) : null;
+    const state = entry?.failed ? `last good reading ${age}` : age ? `updated ${age}` : null;
     return v_flex()
       .size_full()
       .p(5)

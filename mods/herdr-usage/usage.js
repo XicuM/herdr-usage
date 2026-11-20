@@ -303,7 +303,14 @@ export function codexRpc(text) {
     const byId = result.rateLimitsByLimitId ?? (result.rateLimits ? { [result.rateLimits.limitId ?? "codex"]: result.rateLimits } : null);
     if (!byId || typeof byId !== "object") return null;
     const plan = result.rateLimits?.planType ?? Object.values(byId)[0]?.planType ?? null;
-    return { plan: typeof plan === "string" ? capital(plan) : null, windows: byId, credits: null, reset: null };
+    const credits = result.rateLimits?.credits ?? Object.values(byId)[0]?.credits ?? null;
+    const reset = result.rateLimitResetCredits?.availableCount ?? result.rateLimitResetCredits?.available_count;
+    return {
+      plan: typeof plan === "string" ? capital(plan) : null,
+      windows: byId,
+      credits: credits ? { has_credits: credits.hasCredits === true, unlimited: credits.unlimited === true, balance: credits.balance } : null,
+      reset: typeof reset === "number" && reset > 0 ? { count: reset } : null,
+    };
   }
   const snap = lines.find((m) => m?.snapshot)?.snapshot ?? null;
   const rl = snap?.payload?.rate_limits ?? snap?.rate_limits ?? null;
@@ -339,8 +346,9 @@ export function codexLimits(windows, now = Date.now()) {
       const base = m === 10080 ? "Weekly (7-day)" : m === 43200 ? "Monthly" : typeof m !== "number" ? "Rate limit"
         : m % 60 === 0 ? `${m / 60}-hour window` : `${m}-minute window`;
       const label = !name ? base : base === "Weekly (7-day)" ? `Weekly · ${name}` : `${base} · ${name}`;
-      const resets_at = typeof w.resets_at === "string" ? w.resets_at
-        : typeof w.resets_at === "number" ? iso(w.resets_at)
+      const resetAt = w.resets_at ?? w.resetsAt;
+      const resets_at = typeof resetAt === "string" ? resetAt
+        : typeof resetAt === "number" ? iso(resetAt)
         : typeof w.resets_in_seconds === "number" ? iso(Math.floor(now / 1000) + w.resets_in_seconds) : null;
       limits.push({ label, percent: used / 100, resets_at, duration_s: typeof m === "number" ? m * 60 : undefined });
     }
@@ -754,9 +762,10 @@ export function usage({ plan, model, limits, tokens, prompts, cost, week, month,
  *  keeps its last limits (and when they were read). */
 export function merge(old, fresh, now = Date.now()) {
   const has = (u) => Boolean(u?.limits?.length);
+  if (!fresh) return { at: now, usage: old?.usage ?? null, limitsAt: old?.limitsAt ?? null };
   if (has(fresh)) return { at: now, usage: fresh, limitsAt: now };
   if (old?.limitsAt && has(old.usage)) {
-    return { at: now, usage: fresh ? { ...fresh, limits: old.usage.limits } : old.usage, limitsAt: old.limitsAt };
+    return { at: now, usage: { ...fresh, limits: old.usage.limits }, limitsAt: old.limitsAt };
   }
   return { at: now, usage: fresh, limitsAt: null };
 }
@@ -769,7 +778,8 @@ export function shown(entry, provider, now = Date.now()) {
   const limits = (entry.usage.limits ?? [])
     .filter((l) => Number.isFinite(l.percent))
     .map((l) => (isExpired(l, now) ? { ...l, expired: true } : l));
-  const age = typeof entry.at === "number" ? now - entry.at : 0;
+  const at = typeof entry.limitsAt === "number" ? entry.limitsAt : entry.at;
+  const age = typeof at === "number" ? now - at : 0;
   return { ...entry.usage, limits, stale: age >= STALE, failed: Boolean(entry.failed), error: entry.error ?? null };
 }
 

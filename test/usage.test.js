@@ -99,9 +99,11 @@ test("codex app-server RPC reply becomes plan and per-model windows", () => {
       codex: { limitId: "codex", planType: "plus", primary: { usedPercent: 50, windowDurationMins: 300, resetsAt: 1_800_000_000 } },
       other: { limitId: "other", limitName: "Other", primary: { usedPercent: 20, windowDurationMins: 10080 } },
     },
+    rateLimitResetCredits: { availableCount: 2 },
   } });
   const r = u.codexRpc(reply);
   assert.equal(r.plan, "Plus");
+  assert.deepEqual(r.reset, { count: 2 });
   assert.deepEqual(u.codexLimits(r.windows).map((l) => [l.label, l.percent]), [
     ["5-hour window", 0.5], ["Weekly · Other", 0.2],
   ]);
