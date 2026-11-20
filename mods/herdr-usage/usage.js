@@ -35,11 +35,11 @@ export function providerOf(name) {
 
 /** The most rows each provider's popup tab shows, so the popup (which can't be resized once open) is sized
  *  for every tab and never scrolls. From what each reader returns: Claude's 5-hour, weekly and extra usage;
- *  Codex's two windows and credits; Antigravity's 5-hour and weekly buckets for Gemini and for Claude and GPT,
- *  and the "Other models" heading; OpenCode's 5-hour, weekly and monthly; Copilot's premium requests, chat
+ *  Codex's two windows and credits; Antigravity's 5-hour and weekly buckets for Gemini, and its Claude and
+ *  GPT tiers as one row; OpenCode's 5-hour, weekly and monthly; Copilot's premium requests, chat
  *  and completions; OpenRouter's credit limit and balance; DeepSeek's two currencies (CNY, USD). Amp's
  *  refilling pools are open-ended: the popup shows its first two. */
-export const ROWS = { claude: 3, codex: 3, antigravity: 5, grok: 1, opencode: 3, copilot: 3, cursor: 1, openrouter: 2, deepseek: 2, amp: 2 };
+export const ROWS = { claude: 3, codex: 3, antigravity: 3, grok: 1, opencode: 3, copilot: 3, cursor: 1, openrouter: 2, deepseek: 2, amp: 2 };
 
 /** Each provider's name in the status bar and the popup. */
 export const NAMES = {
@@ -554,11 +554,35 @@ export function highestPercent(limits) {
 /** A limit's label for the status bar: "5h", "7d", "30d", or the label itself. */
 export function shortLabel(label) {
   const s = String(label ?? "");
-  if (/5-hour/i.test(s)) return "5h";
+  if (/5[- ]?h(our)?\b/i.test(s)) return "5h";
   if (/weekly|7-day/i.test(s)) return "7d";
   if (/monthly/i.test(s)) return "30d";
   const m = /^(\d+)-(hour|minute) window$/.exec(s);
   return m ? `${m[1]}${m[2][0]}` : s;
+}
+
+/** A limit's label in the popup: the same words for the same window whichever provider names it
+ *  ("Session (5-hour)", "5-hour" → "5-hour"; "Weekly (7-day)", "Weekly SuperGrok Limit" → "Weekly"). */
+export function longLabel(label) {
+  const s = String(label ?? "");
+  if (/5-hour|session/i.test(s)) return "5-hour";
+  if (/weekly|7-day/i.test(s)) return "Weekly";
+  if (/monthly/i.test(s)) return "Monthly";
+  return s;
+}
+
+/** Antigravity's Claude and GPT tiers (its secondary limits) as one row: the most used one's share and reset,
+ *  and each window's share left as its detail ("5h 80% · 7d 90%"). Null when there are none. */
+export function otherModels(limits) {
+  if (!limits?.length) return null;
+  const most = limits.reduce((a, b) => (b.percent > a.percent ? b : a));
+  const left = (l) => Math.round((1 - Math.min(Math.max(l.percent, 0), 1)) * 100);
+  return {
+    label: "Claude & GPT",
+    percent: most.percent,
+    resets_at: most.resets_at ?? null,
+    detail: limits.length > 1 ? limits.map((l) => `${shortLabel(l.label)} ${left(l)}%`).join(" · ") : null,
+  };
 }
 
 /** The theme token for a share used: as herdr-mobile colours it. */

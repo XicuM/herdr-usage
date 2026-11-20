@@ -412,26 +412,24 @@ export default class Usage extends View {
     const entry = shared(KEY)?.[p];
     const us = u.shown(entry, p);
     const tabs = tabsFor(props()?.installed ?? []);
-    // Primary limits first; Antigravity's Claude and GPT tiers after, under "Other models". No more than its
-    // ROWS, the heading counted, which the popup was sized for.
-    const cap = u.ROWS[p] ?? 1;
-    const main = u.primary(us?.limits).slice(0, cap);
-    const other = (us?.limits ?? []).filter((l) => l.primary === false).slice(0, Math.max(cap - main.length - 1, 0));
+    // Primary limits first, then Antigravity's Claude and GPT tiers as one row. No more than its ROWS, which the
+    // popup was sized for.
+    const other = u.otherModels((us?.limits ?? []).filter((l) => l.primary === false));
+    const limits = [...u.primary(us?.limits).slice(0, (u.ROWS[p] ?? 1) - (other ? 1 : 0)), ...(other ? [other] : [])];
     const note = (text) => h_flex().h(36).px(8).items_center().text_color(t.dim).child(div().min_w(0).truncate().child(text));
-    const heading = (text) => h_flex().h(36).px(8).pb(4).items_end().text_size(11).text_color(t.dim).child(text);
     const divider = () => div().mx(7).my(4).h(1).flex_none().bg(t.border);
     // A limit, 36px: its label, its detail ("12 of 300") and when it resets, and the share left, on one line; a
-    // 3px bar of the share used under it. A balance (a `title`, no share) is the line alone.
+    // 3px bar of the share left under it, draining as it's used. A balance (a `title`, no share) is the line alone.
     const row = (l) => {
       const used = Math.min(Math.max(l.percent, 0), 1);
       const color = t[u.tone(used)] ?? t.muted;
       const detail = [l.detail, l.resets_at && `resets ${u.resetsIn(l.resets_at)}`].filter(Boolean).join(" · ");
       const line = h_flex().gap(8).items_center()
-        .child(div().min_w(0).truncate().text_color(t.foreground).child(l.label))
+        .child(div().min_w(0).truncate().text_color(t.foreground).child(u.longLabel(l.label)))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(detail))
-        .child(div().flex_none().text_color(l.title ? t.muted : color).child(l.title ?? `${Math.round((1 - used) * 100)}% left`));
+        .child(div().flex_none().text_color(l.title ? t.muted : color).child(l.title ?? `${Math.round((1 - used) * 100)}%`));
       return v_flex().h(36).px(8).gap(5).justify_center().flex_none().child(line)
-        .when(!l.title, (el) => el.child(div().w_full().h(3).rounded(2).bg(t.border).child(div().h_full().rounded(2).bg(color).w(`${Math.round(used * 100)}%`))));
+        .when(!l.title, (el) => el.child(div().w_full().h(3).rounded(2).bg(t.border).child(div().h_full().rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))));
     };
     const today = [
       us?.today_tokens != null && `${u.formatTokens(us.today_tokens)} tokens`,
@@ -446,13 +444,14 @@ export default class Usage extends View {
       // The provider and its plan, as Herdr's popups title themselves.
       .child(h_flex().h(24).px(8).gap(8).items_center().flex_none()
         .child(div().text_size(11).text_color(t.dim).child(u.NAMES[p] ?? p))
-        .when(Boolean(us?.tier_label), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`· ${us.tier_label}`))))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(us?.tier_label ? `· ${us.tier_label}` : ""))
+        // The rows' percentages are what's left: said once, over their column.
+        .when(limits.some((l) => !l.title), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("left"))))
       .child(v_flex().flex_1().min_h(0)
         .when(!entry, (el) => el.child(note("Reading…")))
         .when(Boolean(entry) && !us, (el) => el.child(note("Not signed in, or the login expired.")))
-        .when(Boolean(us) && !main.length && !other.length, (el) => el.child(note("No rate limits recorded.")))
-        .children(main.map(row))
-        .when(other.length > 0, (el) => el.child(heading("Other models")).children(other.map(row)))
+        .when(Boolean(us) && !limits.length, (el) => el.child(note("No rate limits recorded.")))
+        .children(limits.map(row))
         .when(today.length > 0, (el) => el.child(divider()).child(h_flex().px(8).h(28).items_center().text_size(11).text_color(t.dim).child(`Today: ${today.join(" · ")}`))))
       // One tab per provider, at the bottom: the running ones, then the other installed agents', dimmed.
       .when(tabs.length > 1, (el) => el.child(divider()).child(h_flex().gap(2).flex_none()

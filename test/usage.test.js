@@ -223,3 +223,13 @@ test("claude extra usage, codex credits, opencode stats, today's cost, the bar's
   assert.deepEqual(u.onBar(limits).map((l) => l.label), ["5-hour"]);
   assert.deepEqual(u.primary(limits).map((l) => l.label), ["5-hour", "Extra usage"]);
 });
+
+test("popup labels, and Antigravity's Claude and GPT tiers as one row", () => {
+  assert.deepEqual(["Session (5-hour)", "5-hour", "Weekly (7-day)", "Weekly SuperGrok Limit", "Monthly", "Premium requests"].map(u.longLabel),
+    ["5-hour", "5-hour", "Weekly", "Weekly", "Monthly", "Premium requests"]);
+  assert.equal(u.otherModels([]), null);
+  assert.deepEqual(u.otherModels([
+    { label: "Claude and GPT models 5h", percent: 0.2, resets_at: "a", primary: false },
+    { label: "Claude and GPT models Weekly Limit Remaining", percent: 0.1, resets_at: "b", primary: false },
+  ]), { label: "Claude & GPT", percent: 0.2, resets_at: "a", detail: "5h 80% · 7d 90%" });
+});
