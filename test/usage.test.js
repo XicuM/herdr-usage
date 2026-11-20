@@ -169,25 +169,57 @@ test("opencode reads its three windows and its key", () => {
 // usage.rs: copilot_parses_cache, cursor_parses_cache, openrouter_parses_cache, deepseek_parses_cache
 test("copilot, cursor, openrouter and deepseek", () => {
   assert.equal(u.copilotToken(null, "github.com:\n    oauth_token: gho_x\n", "", ""), "gho_x");
-  assert.deepEqual(u.copilotParse({ sku: "copilot_for_business", expires_at: 1_800_000_000 }), { plan: "Copilot Business", limits: [] });
+  assert.deepEqual(u.copilotUser({
+    copilot_plan: "individual", quota_reset_date: "2026-12-01",
+    quota_snapshots: {
+      premium_interactions: { entitlement: 300, remaining: 75, percent_remaining: 25, unlimited: false },
+      chat: { entitlement: 0, remaining: 0, percent_remaining: 100, unlimited: true },
+    },
+  }), { plan: "Copilot Individual", limits: [{ label: "Premium requests", percent: 0.75, resets_at: "2026-12-01", detail: "75 of 300" }] });
+  assert.equal(u.copilotUser({ message: "Bad credentials" }), null);
+  // Free: premium requests not included; chat and completions limited.
+  assert.deepEqual(u.copilotUser({
+    copilot_plan: "individual", access_type_sku: "free_limited_copilot", quota_reset_date_utc: "2026-12-01T00:00:00.000Z",
+    quota_snapshots: {
+      premium_interactions: { entitlement: 0, remaining: 0, percent_remaining: 0, unlimited: false, has_quota: false },
+      chat: { entitlement: 200, remaining: 150, percent_remaining: 75, unlimited: false, has_quota: true },
+    },
+  }), { plan: "Copilot Free", limits: [{ label: "Chat", percent: 0.25, resets_at: "2026-12-01T00:00:00.000Z", detail: "150 of 200" }] });
   assert.deepEqual(u.noSessionToken([{ label: "Session Token", percent: 0 }, { label: "Premium", percent: 0.5 }]), [{ label: "Premium", percent: 0.5 }]);
   assert.deepEqual(u.genericCache({ tierLabel: "Copilot Business", limits: [{ label: "Session Token", percent: 0 }] }, "sku").plan, "Copilot Business");
   assert.deepEqual(u.cursorParse({ membershipType: "pro", fastRequests: { numRequests: 45, maxRequestUsage: 100 }, startOfMonth: "2026-11-01T00:00:00Z" }),
     { plan: "Cursor Pro", limits: [{ label: "Fast Requests", percent: 0.45, resets_at: "2026-11-01T00:00:00Z" }] });
   assert.equal(u.cursorToken(null, '{"token":"c"}'), "c");
-  assert.deepEqual(u.openrouterParse({ data: { label: "Default Key", usage: 12, limit: 100 } }), { plan: "OpenRouter", limits: [{ label: "Credit Limit", percent: 0.12 }] });
+  assert.deepEqual(u.openrouterParse({ data: { label: "sk-or-v1-0e6...", usage: 12, limit: 100, usage_daily: 1.5 } }),
+    { plan: "OpenRouter", limits: [{ label: "Credit Limit", percent: 0.12, detail: "$12.00 of $100.00" }], cost: 1.5 });
+  assert.deepEqual(u.openrouterParse({ data: { usage: 3, limit: null } }, { data: { total_credits: 20, total_usage: 7.25 } }).limits,
+    [{ label: "Balance", percent: 0, title: "$12.75" }]);
   assert.equal(u.keyFrom("sk-or-123\n"), "sk-or-123");
   assert.equal(u.keyFrom('{"other":1}'), null);
-  assert.deepEqual(u.deepseekParse({ balance_infos: [{ currency: "USD", total_balance: "50.00" }] }),
-    { plan: "DeepSeek API", limits: [{ label: "Balance (USD)", percent: 0, title: "50.00 USD" }] });
+  assert.deepEqual(u.deepseekParse({ balance_infos: [{ currency: "USD", total_balance: "50.00", granted_balance: "10.00", topped_up_balance: "40.00" }] }),
+    { plan: "DeepSeek API", limits: [{ label: "Balance (USD)", percent: 0, title: "50.00 USD", detail: "10.00 granted · 40.00 paid" }] });
 });
 
 // usage.rs: amp_parses_usage
 test("amp reads its balances and today's tokens", () => {
   const got = u.ampParse("# Usage\n\nSigned in as a@b.c\n**Individual credits:** $1,208.62 remaining (set up auto-reload) - https://ampcode.com/settings\n\n" +
     "Range: 2026-11-03T00:00:00.000Z to 2026-11-04T00:00:00.000Z (end exclusive)\nTotal tokens: 2,192,014\nTotal recorded cost: $1.38\n");
-  assert.deepEqual(got, { tier_label: "Individual credits: $1,208.62 left · $1.38 today", limits: [], today_tokens: 2_192_014 });
+  assert.deepEqual(got, { tier_label: "Individual credits: $1,208.62 left", limits: [], today_tokens: 2_192_014, today_cost: 1.38 });
   assert.deepEqual(u.ampParse("**Amp Free:** $7.50/$10 remaining (replenishes +$0.42/hour)\nTotal tokens: 0\n"),
     { tier_label: "Amp", limits: [{ label: "Amp Free", percent: 0.25 }], today_tokens: 0 });
   assert.equal(u.ampParse("Error: not signed in\n"), null);
+});
+
+test("claude extra usage, codex credits, opencode stats, today's cost, the bar's limits", () => {
+  assert.equal(u.claudeExtra({ extra_usage: { is_enabled: false } }), null);
+  assert.deepEqual(u.claudeExtra({ extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1230, utilization: 25, currency: "USD", decimal_places: 2 } }),
+    { label: "Extra usage", percent: 0.25, detail: "12.30 USD of 50.00 USD", bar: false });
+  assert.equal(u.codexCredits({ has_credits: false, unlimited: false, balance: "0" }), null);
+  assert.deepEqual(u.codexCredits({ has_credits: true, unlimited: false, balance: "120" }), { label: "Credits", percent: 0, title: "120 left", bar: false });
+  assert.deepEqual(u.opencodeStats("3|1200|0.25\n", "1|300|0", null), { prompts: 4, tokens: 1500, cost: 0.25 });
+  assert.equal(u.usage({ plan: "Pro", limits: [], cost: 0 }).today_cost, undefined);
+  assert.equal(u.usage({ plan: "Pro", limits: [], cost: 2.5 }).today_cost, 2.5);
+  const limits = [{ label: "5-hour", percent: 0.1 }, { label: "Extra usage", percent: 0.2, bar: false }, { label: "Other", percent: 0, primary: false }];
+  assert.deepEqual(u.onBar(limits).map((l) => l.label), ["5-hour"]);
+  assert.deepEqual(u.primary(limits).map((l) => l.label), ["5-hour", "Extra usage"]);
 });

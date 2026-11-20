@@ -33,6 +33,14 @@ export function providerOf(name) {
   return null;
 }
 
+/** The most rows each provider's popup tab shows, so the popup (which can't be resized once open) is sized
+ *  for every tab and never scrolls. From what each reader returns: Claude's 5-hour, weekly and extra usage;
+ *  Codex's two windows and credits; Antigravity's 5-hour and weekly buckets for Gemini and for Claude and GPT,
+ *  and the "Other models" heading; OpenCode's 5-hour, weekly and monthly; Copilot's premium requests, chat
+ *  and completions; OpenRouter's credit limit and balance; DeepSeek's two currencies (CNY, USD). Amp's
+ *  refilling pools are open-ended: the popup shows its first two. */
+export const ROWS = { claude: 3, codex: 3, antigravity: 5, grok: 1, opencode: 3, copilot: 3, cursor: 1, openrouter: 2, deepseek: 2, amp: 2 };
+
 /** Each provider's name in the status bar and the popup. */
 export const NAMES = {
   claude: "Claude", codex: "Codex", antigravity: "Antigravity", grok: "Grok", opencode: "OpenCode",
@@ -132,6 +140,19 @@ export function claudeLimits(resp) {
   return limits.length ? limits : null;
 }
 
+/** Claude's extra usage (paying past the limits), when it's on: popup only, not the bar. Amounts come in minor
+ *  units, `decimal_places` of them. */
+export function claudeExtra(resp) {
+  const x = resp?.extra_usage;
+  if (x?.is_enabled !== true) return null;
+  const places = Number.isInteger(x.decimal_places) ? x.decimal_places : 2;
+  const money = (n) => `${(n / 10 ** places).toFixed(places)} ${x.currency ?? "USD"}`;
+  const used = typeof x.used_credits === "number" ? x.used_credits : 0;
+  const percent = typeof x.utilization === "number" ? x.utilization / 100 : x.monthly_limit > 0 ? used / x.monthly_limit : null;
+  if (percent === null) return { label: "Extra usage", percent: 0, title: `${money(used)} used`, bar: false };
+  return { label: "Extra usage", percent, detail: x.monthly_limit > 0 ? `${money(used)} of ${money(x.monthly_limit)}` : null, bar: false };
+}
+
 // --- Codex ---------------------------------------------------------------------------------
 
 /** Today's tokens and prompts, the latest model and the rate limits its logs last recorded, from
@@ -179,7 +200,13 @@ export function codexLive(resp) {
     resets_at: w?.reset_at,
   });
   const plan = typeof resp.plan_type === "string" ? capital(resp.plan_type) : null;
-  return { plan, windows: { primary: window(rl.primary_window), secondary: window(rl.secondary_window) } };
+  return { plan, windows: { primary: window(rl.primary_window), secondary: window(rl.secondary_window) }, credits: resp.credits ?? null };
+}
+
+/** Codex's credits (from its usage endpoint or its logs), when it has any: popup only, not the bar. */
+export function codexCredits(c) {
+  if (c?.has_credits !== true) return null;
+  return { label: "Credits", percent: 0, title: c.unlimited === true ? "Unlimited" : `${c.balance ?? 0} left`, bar: false };
 }
 
 /** Codex's windows as limits. */
@@ -335,6 +362,20 @@ export function grokCache(json) {
 
 // --- OpenCode Go ---------------------------------------------------------------------------
 
+/** Today's prompts, tokens and cost from OpenCode's database: sqlite3's `prompts|tokens|cost` line for each of
+ *  its message tables (v2's session_message, v1's message). Tokens as Claude's are counted: input, output,
+ *  reasoning and cache writes. */
+export function opencodeStats(...outputs) {
+  let prompts = 0, tokens = 0, cost = 0;
+  for (const out of outputs) {
+    const [p, t, c] = String(out ?? "").trim().split("|").map(Number);
+    if (Number.isFinite(p)) prompts += p;
+    if (Number.isFinite(t)) tokens += t;
+    if (Number.isFinite(c)) cost += c;
+  }
+  return { prompts, tokens, cost };
+}
+
 /** OpenCode Go's key: OpenCode v2's active credential (sqlite3's output), else the older auth file. */
 export function opencodeKey(dbOut, authText) {
   const key = parse(dbOut ?? "")?.key;
@@ -360,12 +401,23 @@ export function copilotToken(hostsJson, ghHostsYml, ghToken, env) {
   return String(ghToken ?? "").trim() || String(env ?? "").trim() || null;
 }
 
-const SKUS = { copilot_for_business: "Copilot Business", business: "Copilot Business", copilot_enterprise: "Copilot Enterprise", enterprise: "Copilot Enterprise", individual: "Copilot Individual" };
-/** Copilot's plan, from its token endpoint's answer or another tool's usage file. The token's expiry, which
- *  usage.rs listed as a "Session Token" limit at 0%, isn't a quota: it's left out. */
-export function copilotParse(resp) {
-  return { plan: typeof resp?.sku === "string" ? SKUS[resp.sku] ?? resp.sku : null, limits: [] };
+/** Copilot's plan and quotas from `copilot_internal/user`: premium requests, and chat and completions where
+ *  the plan limits them (Free). An unlimited quota isn't a limit, nor one the plan doesn't include (Free's
+ *  premium requests: `entitlement` 0, `has_quota` false). */
+export function copilotUser(resp) {
+  if (!resp || typeof resp !== "object" || (!resp.copilot_plan && !resp.quota_snapshots)) return null;
+  const resets_at = resp.quota_reset_date_utc ?? resp.quota_reset_date ?? null;
+  const limits = [["premium_interactions", "Premium requests"], ["chat", "Chat"], ["completions", "Completions"]].flatMap(([key, label]) => {
+    const q = resp.quota_snapshots?.[key];
+    if (!q || q.unlimited === true || q.has_quota === false || q.entitlement === 0 || typeof q.percent_remaining !== "number") return [];
+    const detail = q.entitlement > 0 && typeof q.remaining === "number" ? `${Math.round(q.remaining)} of ${q.entitlement}` : null;
+    return [{ label, percent: Math.min(Math.max(1 - q.percent_remaining / 100, 0), 1), resets_at, detail }];
+  });
+  // The sku says Free ("free_limited_copilot") where the plan says "individual".
+  const plan = /free/.test(resp.access_type_sku ?? "") ? "free" : resp.copilot_plan;
+  return { plan: typeof plan === "string" ? `Copilot ${capital(plan)}` : "Copilot", limits };
 }
+/** Another tool's usage file may list the token's expiry, which usage.rs called a "Session Token" limit: not a quota. */
 export const noSessionToken = (limits) => (limits ?? []).filter((l) => l.label !== "Session Token");
 
 /** Cursor's token from its auth files' texts. */
@@ -390,15 +442,20 @@ export function cursorParse(resp) {
   return { plan, limits };
 }
 
-/** OpenRouter's key endpoint's answer: the key's label, and its credit limit when it has one. */
-export function openrouterParse(resp) {
+/** OpenRouter's key endpoint's answer (its credit limit, today's spend) and `/credits` (the balance). */
+export function openrouterParse(resp, credits) {
   const data = resp?.data;
   if (!data) return null;
   const used = data.usage ?? 0;
-  const limits = data.limit > 0 ? [{ label: "Credit Limit", percent: Math.min(Math.max(used / data.limit, 0), 1) }]
+  const limits = data.limit > 0 ? [{ label: "Credit Limit", percent: Math.min(Math.max(used / data.limit, 0), 1), detail: `$${used.toFixed(2)} of $${data.limit.toFixed(2)}` }]
     : data.is_free_tier === true ? [{ label: "Free Tier", percent: 0 }] : [];
+  // The account's balance (`/credits`): for pay-as-you-go, the money left is the limit.
+  const c = credits?.data;
+  if (typeof c?.total_credits === "number" && typeof c.total_usage === "number") {
+    limits.push({ label: "Balance", percent: 0, title: `$${(c.total_credits - c.total_usage).toFixed(2)}` });
+  }
   // Not the key's `label`: it's often the key itself, shortened ("sk-or-v1-0e6…").
-  return { plan: "OpenRouter", limits };
+  return { plan: "OpenRouter", limits, cost: typeof data.usage_daily === "number" ? data.usage_daily : null };
 }
 
 /** DeepSeek's balance: shown as a `title`, since a balance has no share used. */
@@ -406,7 +463,9 @@ export function deepseekParse(resp) {
   if (!resp || typeof resp !== "object") return null;
   const limits = (resp.balance_infos ?? []).map((b) => {
     const curr = b.currency ?? "USD";
-    return { label: `Balance (${curr})`, percent: 0, title: `${b.total_balance ?? "0"} ${curr}` };
+    // Granted credit is spent first and may expire; topped-up is what was paid.
+    const detail = b.granted_balance != null && b.topped_up_balance != null ? `${b.granted_balance} granted · ${b.topped_up_balance} paid` : null;
+    return { label: `Balance (${curr})`, percent: 0, title: `${b.total_balance ?? "0"} ${curr}`, detail };
   });
   return { plan: "DeepSeek API", limits };
 }
@@ -441,20 +500,22 @@ export function ampParse(text) {
     }
   }
   if (!limits.length && !balances.length && tokens === null) return null;
-  const plan = [...balances, ...(cost ? [`${cost} today`] : [])].join(" · ") || "Amp";
-  return { tier_label: plan, limits, today_tokens: tokens ?? 0 };
+  const spent = cost ? Number(cost.replace(/[$,]/g, "")) : NaN;
+  return { tier_label: balances.join(" · ") || "Amp", limits, today_tokens: tokens ?? 0, ...(spent > 0 && { today_cost: spent }) };
 }
 
 // --- All -----------------------------------------------------------------------------------
 
 /** One agent's usage, or null when there is nothing to say. Tokens and prompts only where known. */
-export function usage({ plan, model, limits, tokens, prompts }) {
+export function usage({ plan, model, limits, tokens, prompts, cost }) {
   if (!tokens && !prompts && !limits?.length && !plan && !model) return null;
   return {
     tier_label: plan ?? model ?? null,
     limits: limits ?? [],
     ...(tokens != null && { today_tokens: tokens }),
     ...(prompts != null && { today_prompts: prompts }),
+    // Dollars spent today, where the source records it and it's more than nothing (subscriptions record 0).
+    ...(cost > 0 && { today_cost: cost }),
   };
 }
 
@@ -481,6 +542,8 @@ export function shown(entry, provider, now = Date.now()) {
 
 /** The limits that make the headline: all but Antigravity's secondary tiers. */
 export const primary = (limits) => (limits ?? []).filter((l) => l.primary !== false);
+/** The limits on the status bar: the headline ones, but not extra usage or credits, which only matter in the popup. */
+export const onBar = (limits) => primary(limits).filter((l) => l.bar !== false);
 
 /** The highest share used among the primary limits, or null. */
 export function highestPercent(limits) {
