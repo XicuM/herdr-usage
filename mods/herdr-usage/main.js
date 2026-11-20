@@ -351,6 +351,8 @@ const rowsFor = (prov) => {
 /** A popup row's height: a line of text and a 3px bar 5px under it, with about 11px above and below, so rows
  *  stand clearly apart and each bar reads as its own label's. */
 const ROW = 46;
+/** A popup row's bar is 254px wide: 280 minus the popup's and the row's side padding. */
+const ROW_BAR_W = 254;
 /** The bar beside a limit: its fill drains with the quota left, the tick marks the time left. */
 const BAR_W = 26;
 const bar = (fill, tick, color, t) => div().relative().w(BAR_W).h(3).rounded(2).bg(t.border).flex_none()
@@ -542,7 +544,7 @@ export default class Usage extends View {
       return v_flex().h(ROW).px(8).gap(5).justify_center().flex_none().child(line)
         .when(!l.title && !l.expired, (el) => el.child(div().relative().w_full().h(3).rounded(2).bg(t.border)
           .child(div().absolute().left(0).top(0).h(3).rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))
-          .when(p?.left != null, (b) => b.child(div().absolute().top(-2).left(`${Math.round(p.left * 100)}%`).w(1).h(7).bg(t.foreground).opacity(0.75)))));
+          .when(p?.left != null, (b) => b.child(div().absolute().top(-2).left(Math.round(ROW_BAR_W * p.left)).w(1).h(7).bg(t.foreground).opacity(0.75)))));
     };
     const today = [
       us?.today_tokens != null && `${u.formatTokens(us.today_tokens)} tokens`,
