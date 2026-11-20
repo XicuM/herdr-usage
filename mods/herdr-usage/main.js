@@ -427,7 +427,12 @@ export default class Usage extends View {
       const line = h_flex().gap(8).items_center()
         .child(div().min_w(0).truncate().text_color(t.foreground).child(u.longLabel(l.label)))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(detail))
-        .child(div().flex_none().text_color(l.title ? t.muted : color).child(l.title ?? `${Math.round((1 - used) * 100)}%`));
+        .child(l.title
+          ? div().flex_none().text_color(t.muted).child(l.title)
+          // "62% left": the share in its colour, the word small and dim, so it reads plainly in little room.
+          : h_flex().flex_none().gap(3).items_baseline()
+            .child(div().text_color(color).child(`${Math.round((1 - used) * 100)}%`))
+            .child(div().text_size(11).text_color(t.dim).child("left")));
       return v_flex().h(36).px(8).gap(5).justify_center().flex_none().child(line)
         .when(!l.title, (el) => el.child(div().w_full().h(3).rounded(2).bg(t.border).child(div().h_full().rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))));
     };
@@ -444,9 +449,7 @@ export default class Usage extends View {
       // The provider and its plan, as Herdr's popups title themselves.
       .child(h_flex().h(24).px(8).gap(8).items_center().flex_none()
         .child(div().text_size(11).text_color(t.dim).child(u.NAMES[p] ?? p))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(us?.tier_label ? `· ${us.tier_label}` : ""))
-        // The rows' percentages are what's left: said once, over their column.
-        .when(limits.some((l) => !l.title), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("left"))))
+        .when(Boolean(us?.tier_label), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`· ${us.tier_label}`))))
       .child(v_flex().flex_1().min_h(0)
         .when(!entry, (el) => el.child(note("Reading…")))
         .when(Boolean(entry) && !us, (el) => el.child(note("Not signed in, or the login expired.")))
