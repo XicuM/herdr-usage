@@ -350,7 +350,10 @@ const rowsFor = (prov) => {
 
 /** Today's and the week's lines a provider's tab shows. */
 const infoLinesFor = (prov) => {
-  const us = u.shown(shared(KEY)?.[prov], prov);
+  const entry = shared(KEY)?.[prov];
+  // A tab that hasn't been read yet may still grow two lines when it is picked.
+  if (!entry) return prov === "opencode" || prov === "pi" || prov === "openrouter" ? 2 : 1;
+  const us = u.shown(entry, prov);
   if (!us) return 0;
   const today = us.today_tokens != null || us.today_prompts != null || us.today_cost > 0;
   const week = us.week_tokens != null || us.week_prompts != null || us.week_cost > 0 || us.month_cost > 0;
