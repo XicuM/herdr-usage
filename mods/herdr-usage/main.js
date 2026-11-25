@@ -360,12 +360,8 @@ const infoLinesFor = (prov) => {
   return Number(today) + Number(week);
 };
 
-/** Seven 31px tabs fit 280px wide, with room for a text-only one; more providers get another row. */
-const tabRowsFor = (tabs) => {
-  const rows = [];
-  for (let i = 0; i < tabs.length; i += 7) rows.push(tabs.slice(i, i + 7));
-  return rows;
-};
+/** A tab's width: a 14px icon with 8px either side; a name in its place, at 11px, sets its own. */
+const tabWidth = (x) => (x.program?.icon ? 31 : Math.max(31, Math.round(u.NAMES[x.p].length * 6.5) + 16));
 
 /** A popup row's height: a line of text and a 3px bar 5px under it, with about 11px above and below, so rows
  *  stand clearly apart and each bar reads as its own label's. */
@@ -509,17 +505,18 @@ export default class Usage extends View {
 
   // The popup on provider p's tab, sized for the tab that shows the most rows, so no tab scrolls or is cut off.
   // Every part has a fixed height: 5px padding twice, the 24px title, ROW-tall rows, the reset line when there is
-  // one (a 9px divider and 28px), today/week lines, and the tab rows (a 9px divider and 31px each).
+  // one (a 9px divider and 28px), today/week lines, and the tab row (a 9px divider and 31px). The width fits every
+  // tab in one row, 2px apart, and never drops below the room a tab's limits need.
   open(p) {
     const tabs = tabsFor(this.installed);
     const rows = Math.max(...tabs.map((x) => rowsFor(x.p)), 1);
     const reset = tabs.some((x) => u.shown(shared(KEY)?.[x.p], x.p)?.reset_note) ? 37 : 0;
     const info = Math.max(...tabs.map((x) => infoLinesFor(x.p)), 0);
     const infoHeight = info ? INFO_DIVIDER + INFO_ROW * info : 0;
-    const tabRows = tabRowsFor(tabs).length;
-    const tabsHeight = tabs.length > 1 ? INFO_DIVIDER + 31 * tabRows + 2 * (tabRows - 1) : 0;
+    const tabsHeight = tabs.length > 1 ? INFO_DIVIDER + 31 : 0;
     const height = 10 + 24 + ROW * rows + reset + infoHeight + tabsHeight;
-    openOverlay({ mod: "herdr-usage", kind: "popup", width: 280, height, props: { sheet: p, installed: this.installed } });
+    const width = Math.max(280, 10 + tabs.reduce((n, x) => n + tabWidth(x), 0) + 2 * Math.max(tabs.length - 1, 0));
+    openOverlay({ mod: "herdr-usage", kind: "popup", width, height, props: { sheet: p, installed: this.installed } });
   }
 
   sheet(t) {
@@ -610,7 +607,6 @@ export default class Usage extends View {
           .children(info.map((line) => h_flex().h(INFO_ROW).px(8).items_center()
             .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(line)))))))
       // One tab per provider, at the bottom: the running ones, then the other installed agents', dimmed.
-      .when(tabs.length > 1, (el) => el.child(divider()).child(v_flex().gap(2).flex_none()
-        .children(tabRowsFor(tabs).map(tabRow))));
+      .when(tabs.length > 1, (el) => el.child(divider()).child(tabRow(tabs)));
   }
 }
