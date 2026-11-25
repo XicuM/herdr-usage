@@ -13,11 +13,11 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, knownAgents, exec, home, readTextFile, shared, setShared, settings, theme, openOverlay, props, checking, run as runCommand } from "herdr";
+import { agents, appHome, knownAgents, exec, home, readTextFile, shared, setShared, settings, theme, openOverlay, props, checking, run as runCommand } from "herdr";
 import * as u from "./usage.js";
 
 const KEY = "herdr-usage.v1";
-const LIVE = "herdr-usage.live.v1";
+const LIVE = "herdr-usage.live.v2";
 const READING = "herdr-usage.reading.v1";
 const RAN = "herdr-usage.ran.v1";
 /** A read that started this long ago and never finished (the mod reloaded mid-read) no longer blocks. */
@@ -29,6 +29,8 @@ const CLAUDE_LINES = `find "$1" -maxdepth 4 -type f -name '*.jsonl' -mmin -${u.R
 const CODEX_LINES = `find "$1" -maxdepth 4 -type f -name '*.jsonl' -mmin -${u.RECENT_MINUTES} -exec grep -H -E '"(token_count|user_message|turn_context)"' {} + 2>/dev/null`;
 // $1 a folder, $2 the files' name, $3 what a line must hold.
 const LINES = `find "$1" -maxdepth 6 -type f -name "$2" -mmin -${u.RECENT_MINUTES} -exec grep -h -F -- "$3" {} + 2>/dev/null`;
+// Pi keeps its sessions for longer than a day: its messages carry their own timestamps, so read eight days.
+const PI_LINES = `find "$1" -maxdepth 6 -type f -name '*.jsonl' -mtime -8 -exec grep -h -F -- '"type":"message"' {} + 2>/dev/null`;
 // The newest of the given files, if written in the last 3 minutes (usage.rs's STALE): a tool no longer
 // running leaves its last numbers behind.
 const NEWEST = `f=$(ls -t -- "$@" 2>/dev/null | head -n 1); [ -n "$f" ] && [ -n "$(find "$f" -maxdepth 0 -type f -mmin -3)" ] && cat -- "$f"`;
@@ -38,6 +40,8 @@ const provider = (a) => [a?.app, a?.program?.key, a?.program?.name].map(u.provid
 const read = (path) => readTextFile(path).catch(() => null);
 const H = (path) => `${home()}/${path}`;
 const run = (cmd, args, timeout = 20_000, cwd) => exec(cmd, args, { timeout, cwd }).then((r) => (r.code === 0 ? r.stdout : null)).catch(() => null);
+// A helper in this mod's installed copy, since a mod's own folder isn't its working directory.
+const runHelper = (name, timeout = 20_000) => run("sh", [`${appHome()}/mods/herdr-usage/helpers/${name}`], timeout);
 // sh's own exit code isn't the point here (grep finding nothing is 1): only what it printed.
 const lines = (script, args) => exec("sh", ["-c", script, "herdr-usage", ...args], { timeout: 20_000 })
   .then((r) => r.stdout.split("\n").filter(Boolean)).catch(() => []);
@@ -81,6 +85,9 @@ async function readClaude() {
   const today = u.todayUtc();
   // Anthropic answers about one read every two minutes: its last answer stands until then.
   const l = await live("claude", u.CLAUDE_LIVE_TTL, async () => {
+    // The CLI's own sign-in and its get_usage reply: scoped per-model windows, and no token read here.
+    const cli = u.claudeCli(await runHelper("claude-usage.sh"));
+    if (cli?.limits.length) return cli;
     const login = u.claudeLogin(await read(H(".claude/.credentials.json")));
     const resp = login && await getJson("https://api.anthropic.com/api/oauth/usage", {
       Authorization: `Bearer ${login.token}`,
@@ -104,6 +111,9 @@ async function readCodex() {
   const s = u.codexStats(entries, u.todayUtc());
   // Its windows as the usage endpoint gives them now, else as its logs last recorded them.
   const l = await live("codex", u.NET_TTL, async () => {
+    // The CLI's own sign-in and app-server RPC: per-model window groups, and no token read here.
+    const cli = u.codexRpc(await runHelper("codex-limits.sh"));
+    if (cli) return cli;
     const login = u.codexLogin(await read(H(".codex/auth.json")));
     return login && u.codexLive(await getJson("https://chatgpt.com/backend-api/wham/usage", {
       Authorization: `Bearer ${login.token}`,
@@ -119,7 +129,7 @@ async function readCodex() {
     plan = plan ?? c?.plan ?? null;
     limits = c?.limits ?? [];
   }
-  const credits = u.codexCredits(l?.credits ?? s.logLimits?.credits);
+  const credits = u.codexCredits(l?.credits ?? s.logCredits);
   if (credits) limits = [...limits, credits];
   return u.usage({ plan, model: s.model, limits, tokens: s.tokens, prompts: s.prompts, reset: l?.reset });
 }
@@ -164,30 +174,66 @@ async function readGrok() {
 }
 
 async function readOpencode() {
+  const db = H(".local/share/opencode/opencode.db");
   let limits = await live("opencode", u.NET_TTL, async () => {
     // Read-only: sqlite3 would otherwise create an empty database where OpenCode has none.
-    const key = u.opencodeKey(
-      await run("sqlite3", ["-readonly", H(".local/share/opencode/opencode.db"), "select value from credential where integration_id='opencode-go' and active=1 limit 1;"]),
+    const authPath = await env("HERDR_USAGE_OPENCODE_GO_AUTH");
+    const key = (await env("HERDR_USAGE_OPENCODE_GO_KEY")) || u.opencodeKey(
+      await run("sqlite3", ["-readonly", db, "select value from credential where integration_id='opencode-go' and active=1 limit 1;"]),
+      ...(authPath ? [await read(authPath)] : []),
       await read(H(".local/share/opencode/auth.json")),
+      await read(H(".config/opencode/auth.json")),
+      await read(H(".pi/agent/auth.json")),
     );
     // Cloudflare (error 1010) rejects a request without a User-Agent, which is what Herdr's fetch sends.
-    return key && u.opencodeLimits((await getJson("https://opencode.ai/zen/go/v1/usage", { Authorization: `Bearer ${key}`, "User-Agent": "opencode/1.0" }))?.usage);
+    const headers = { Authorization: `Bearer ${key}`, "User-Agent": "opencode/1.0" };
+    const org = await env("HERDR_USAGE_OPENCODE_GO_ORG");
+    if (org) headers["x-opencode-org-id"] = org;
+    return key && u.opencodeLimits((await getJson("https://opencode.ai/zen/go/v1/usage", headers))?.usage);
   }) ?? [];
   // ai-usagebar keeps this same reply, under `response`, for its own display.
   if (!limits.length) {
     const c = await cached("opencode");
     limits = u.opencodeLimits(c?.response?.usage ?? c?.usage);
   }
-  // Today's prompts, tokens and cost from its database, both message tables (v2 and v1); read-only, as above.
-  const since = Date.parse(`${u.todayUtc()}T00:00:00Z`);
-  const db = H(".local/share/opencode/opencode.db");
+  // Today's and the week's prompts, tokens and cost, read-only. During a v1→v2 migration both stores can hold
+  // the same rows: prefer v2's sessions and exclude their v1 copies, so nothing is counted twice. v1's
+  // compaction requests and synthetic continuations aren't the person's prompts.
+  const todayStart = Date.parse(`${u.todayUtc()}T00:00:00Z`);
+  const weekStart = u.weekStartUtc();
   const tokens = (j) => `coalesce(json_extract(${j},'$.tokens.input'),0)+coalesce(json_extract(${j},'$.tokens.output'),0)+coalesce(json_extract(${j},'$.tokens.reasoning'),0)+coalesce(json_extract(${j},'$.tokens.cache.write'),0)`;
-  const s = u.opencodeStats(
-    await run("sqlite3", ["-readonly", db, `select coalesce(sum(type='user'),0), coalesce(sum(case when type='assistant' then ${tokens("data")} end),0), coalesce(sum(case when type='assistant' then json_extract(data,'$.cost') end),0) from session_message where time_created >= ${since};`]),
-    await run("sqlite3", ["-readonly", db, `select coalesce(sum(json_extract(data,'$.role')='user'),0), coalesce(sum(case when json_extract(data,'$.role')='assistant' then ${tokens("data")} end),0), coalesce(sum(case when json_extract(data,'$.role')='assistant' then json_extract(data,'$.cost') end),0) from message where time_created >= ${since};`]),
-  );
+  const tables = (await run("sqlite3", ["-readonly", db, "select name from sqlite_master where type='table';"])) ?? "";
+  const has = (name) => tables.split("\n").includes(name);
+  const hasV2 = has("session_message"), hasV1 = has("message"), hasPart = has("part");
+  const v2 = hasV2 && await run("sqlite3", ["-readonly", db, `select
+    coalesce(sum(case when time_created >= ${todayStart} and type='user' then 1 else 0 end),0),
+    coalesce(sum(case when time_created >= ${todayStart} and type='assistant' then ${tokens("data")} else 0 end),0),
+    coalesce(sum(case when time_created >= ${todayStart} and type='assistant' then json_extract(data,'$.cost') else 0 end),0),
+    coalesce(sum(case when type='user' then 1 else 0 end),0),
+    coalesce(sum(case when type='assistant' then ${tokens("data")} else 0 end),0),
+    coalesce(sum(case when type='assistant' then json_extract(data,'$.cost') else 0 end),0)
+    from session_message where time_created >= ${weekStart};`]);
+  const skip = [
+    ...(hasV2 ? [`and not exists (select 1 from session_message sm where sm.session_id = m.session_id and sm.time_created >= ${weekStart})`] : []),
+    ...(hasPart ? [
+      `and not exists (select 1 from part p where p.session_id = m.session_id and p.message_id = m.id and json_valid(p.data) and json_extract(p.data,'$.type') = 'compaction')`,
+      `and (not exists (select 1 from part p where p.session_id = m.session_id and p.message_id = m.id and json_valid(p.data) and coalesce(json_extract(p.data,'$.synthetic'),0) = 1)
+        or exists (select 1 from part p where p.session_id = m.session_id and p.message_id = m.id and json_valid(p.data) and json_extract(p.data,'$.type') in ('text','file') and coalesce(json_extract(p.data,'$.synthetic'),0) = 0 and coalesce(json_extract(p.data,'$.ignored'),0) = 0))`,
+    ] : []),
+  ].join("\n    ");
+  const v1 = hasV1 && await run("sqlite3", ["-readonly", db, `select
+    coalesce(sum(case when m.time_created >= ${todayStart} and json_extract(m.data,'$.role')='user' then 1 else 0 end),0),
+    coalesce(sum(case when m.time_created >= ${todayStart} and json_extract(m.data,'$.role')='assistant' then ${tokens("m.data")} else 0 end),0),
+    coalesce(sum(case when m.time_created >= ${todayStart} and json_extract(m.data,'$.role')='assistant' then json_extract(m.data,'$.cost') else 0 end),0),
+    coalesce(sum(case when json_extract(m.data,'$.role')='user' then 1 else 0 end),0),
+    coalesce(sum(case when json_extract(m.data,'$.role')='assistant' then ${tokens("m.data")} else 0 end),0),
+    coalesce(sum(case when json_extract(m.data,'$.role')='assistant' then json_extract(m.data,'$.cost') else 0 end),0)
+    from message m where m.time_created >= ${weekStart}
+    ${skip};`]);
+  const s = u.opencodeStats(v2 || null, v1 || null);
   if (!limits.length && !s.prompts && !s.tokens) return null;
-  return u.usage({ plan: "OpenCode Go", limits, tokens: s.tokens, prompts: s.prompts, cost: s.cost });
+  return u.usage({ plan: limits.length ? "OpenCode Go" : "OpenCode", limits, tokens: s.tokens, prompts: s.prompts,
+    cost: s.cost, week: s.week_cost, week_tokens: s.week_tokens, week_prompts: s.week_prompts, spend: !limits.length });
 }
 
 async function readCopilot() {
@@ -260,9 +306,17 @@ async function readAmp() {
   });
 }
 
+// Pi has no limits: today's and the week's tokens from its session files, which hold only numbers here.
+async function readPi() {
+  const s = u.piStats(await lines(PI_LINES, [H(".pi/agent/sessions")]), u.todayUtc(), u.weekStartUtc());
+  if (!s.today_tokens && !s.today_prompts && !s.week_tokens) return null;
+  return u.usage({ plan: "Pi", limits: [], tokens: s.today_tokens, prompts: s.today_prompts,
+    week_tokens: s.week_tokens, week_prompts: s.week_prompts, spend: true });
+}
+
 const READERS = {
   claude: readClaude, codex: readCodex, antigravity: readAntigravity, grok: readGrok, opencode: readOpencode,
-  copilot: readCopilot, cursor: readCursor, openrouter: readOpenrouter, deepseek: readDeepseek, amp: readAmp,
+  copilot: readCopilot, cursor: readCursor, openrouter: readOpenrouter, deepseek: readDeepseek, pi: readPi, amp: readAmp,
 };
 
 // The agent's icon from the app's program table: a one-color glyph or a picture.
@@ -285,9 +339,36 @@ function tabsFor(installed) {
   ];
 }
 
+/** The rows a provider's tab shows: its primary limits, plus Antigravity's Claude & GPT tiers as one. */
+const rowsFor = (prov) => {
+  const entry = shared(KEY)?.[prov];
+  const limits = u.shown(entry, prov)?.limits ?? [];
+  const other = u.otherModels(limits.filter((l) => l.primary === false));
+  const actual = u.primary(limits).length + (other ? 1 : 0);
+  return Math.max(entry ? 1 : (u.ROWS[prov] ?? 1), actual);
+};
+
+/** Today's and the week's lines a provider's tab shows. */
+const infoLinesFor = (prov) => {
+  const entry = shared(KEY)?.[prov];
+  // A tab that hasn't been read yet may still grow two lines when it is picked.
+  if (!entry) return prov === "opencode" || prov === "pi" || prov === "openrouter" ? 2 : 1;
+  const us = u.shown(entry, prov);
+  if (!us) return 0;
+  const today = us.today_tokens != null || us.today_prompts != null || us.today_cost > 0;
+  const week = us.week_tokens != null || us.week_prompts != null || us.week_cost > 0 || us.month_cost > 0;
+  return Number(today) + Number(week);
+};
+
+/** A tab's width: a 14px icon with 8px either side; a name in its place, at 11px, sets its own. */
+const tabWidth = (x) => (x.program?.icon ? 31 : Math.max(31, Math.round(u.NAMES[x.p].length * 6.5) + 16));
+
 /** A popup row's height: a line of text and a 3px bar 5px under it, with about 11px above and below, so rows
  *  stand clearly apart and each bar reads as its own label's. */
 const ROW = 46;
+/** The popup's today/week lines: one 22px line each, after a 9px divider. */
+const INFO_ROW = 22;
+const INFO_DIVIDER = 9;
 
 /** The layout block this mod sits in. It sizes it to its text, so it reads as part of the status bar. */
 const BLOCK = "herdr-usage";
@@ -337,14 +418,19 @@ export default class Usage extends View {
     if (now - (shared(READING)?.[p] ?? 0) < READ_TIMEOUT) return;
     setShared(READING, { ...shared(READING), [p]: now });
     cx.spawn(async () => {
-      let fresh = null;
+      let fresh = null, error = null;
       try {
         fresh = await READERS[p]();
       } catch (e) {
+        error = String(e);
         console.log(`herdr-usage: ${p}: ${e}`);
       }
       const all = shared(KEY) ?? {};
-      setShared(KEY, { ...all, [p]: u.merge(all[p], fresh) });
+      const merged = u.merge(all[p], fresh);
+      // A read that returns no limits while the last one had them is a failure too: the old ones stay, dimmed.
+      const failed = !fresh || (!fresh.spend && !fresh.limits?.length && Boolean(all[p]?.limitsAt));
+      const entry = { ...merged, failed, ...(error && { error }) };
+      setShared(KEY, { ...all, [p]: entry });
       setShared(READING, { ...shared(READING), [p]: 0 });
     });
   }
@@ -352,18 +438,27 @@ export default class Usage extends View {
   render() {
     const t = theme();
     if (this.sheetFor) return this.sheet(t);
-    // One group per provider, "Claude 5h 75% · 7d 19%": the share left, coloured by the share used; a balance as its amount.
+    // One group per provider, "Claude 5h 75% · 7d 19%": the share left, coloured by the share used; a balance as
+    // its amount; a spend-only provider as today's tokens.
     const groups = providers().map((p) => {
-      const limits = u.onBar(u.shown(shared(KEY)?.[p], p)?.limits);
+      const entry = shared(KEY)?.[p];
+      const us = u.shown(entry, p);
+      const limits = u.onBar(us?.limits);
+      const failed = Boolean(entry?.failed) || Boolean(us?.stale);
       const pic = icon(agents().find((a) => provider(a) === p)?.program, 13, t.muted)?.mr(4);
       const parts = limits.flatMap((l, i) => {
         const used = Math.min(Math.max(l.percent, 0), 1);
+        const color = t[u.tone(used)] ?? t.muted;
+        const reset = !l.expired && used >= 0.75 && l.resets_at ? u.resetsIn(l.resets_at).replace(/^in /, "") : null;
         return [
           ...(i ? [div().text_color(t.dim).child("·")] : []),
-          h_flex().gap(4).child(div().child(u.shortLabel(l.label)))
-            .child(div().font_semibold().text_color(l.title ? t.foreground : t[u.tone(used)] ?? t.muted).child(l.title ?? `${Math.round((1 - used) * 100)}%`)),
+          h_flex().gap(4).items_center()
+            .child(div().child(u.shortLabel(l.label)))
+            .child(div().font_semibold().text_color(l.expired ? t.dim : l.title ? t.foreground : color).child(l.expired ? "—" : l.title ?? `${Math.round((1 - used) * 100)}%`))
+            .when(Boolean(reset), (el) => el.child(div().text_size(10).text_color(t.dim).child(reset))),
         ];
       });
+      const spendTokens = !limits.length && us?.spend && us.today_tokens != null ? us.today_tokens : null;
       return h_flex()
         .id(`usage-${p}`)
         .h(22)
@@ -372,13 +467,15 @@ export default class Usage extends View {
         .flex_none()
         .items_center()
         .rounded(5)
+        .opacity(failed ? 0.55 : 1)
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
-        .tooltip(`${u.NAMES[p]}: quota left; click for details`)
         .on_click(() => this.open(p))
         // The agent's icon, as herdr-mobile shows it; its name only when it has none.
         .child(pic ?? div().text_color(t.foreground).child(u.NAMES[p]))
-        .when(!parts.length, (el) => el.child(div().text_color(t.dim).child("–")))
+        .when(failed, (el) => el.child(div().text_color(t.dim).child("!")))
+        .when(!parts.length && spendTokens == null, (el) => el.child(div().text_color(t.dim).child("–")))
+        .when(spendTokens != null, (el) => el.child(div().text_color(t.dim).child("today")).child(div().text_color(t.foreground).child(u.formatTokens(spendTokens))))
         .children(parts);
     });
     // Drawn as part of Herdr's status bar: its background, top border and text, after a divider.
@@ -408,13 +505,18 @@ export default class Usage extends View {
 
   // The popup on provider p's tab, sized for the tab that shows the most rows, so no tab scrolls or is cut off.
   // Every part has a fixed height: 5px padding twice, the 24px title, ROW-tall rows, the reset line when there is
-  // one (a 9px divider and 28px), today's line (the same) and, with several tabs, the tab row (a 9px divider and 31px).
+  // one (a 9px divider and 28px), today/week lines, and the tab row (a 9px divider and 31px). The width fits every
+  // tab in one row, 2px apart, and never drops below the room a tab's limits need.
   open(p) {
     const tabs = tabsFor(this.installed);
-    const rows = Math.max(...tabs.map((x) => u.ROWS[x.p] ?? 1), u.ROWS[p] ?? 1);
+    const rows = Math.max(...tabs.map((x) => rowsFor(x.p)), 1);
     const reset = tabs.some((x) => u.shown(shared(KEY)?.[x.p], x.p)?.reset_note) ? 37 : 0;
-    const height = 10 + 24 + ROW * rows + reset + 37 + (tabs.length > 1 ? 40 : 0);
-    openOverlay({ mod: "herdr-usage", kind: "popup", width: 280, height, props: { sheet: p, installed: this.installed } });
+    const info = Math.max(...tabs.map((x) => infoLinesFor(x.p)), 0);
+    const infoHeight = info ? INFO_DIVIDER + INFO_ROW * info : 0;
+    const tabsHeight = tabs.length > 1 ? INFO_DIVIDER + 31 : 0;
+    const height = 10 + 24 + ROW * rows + reset + infoHeight + tabsHeight;
+    const width = Math.max(280, 10 + tabs.reduce((n, x) => n + tabWidth(x), 0) + 2 * Math.max(tabs.length - 1, 0));
+    openOverlay({ mod: "herdr-usage", kind: "popup", width, height, props: { sheet: p, installed: this.installed } });
   }
 
   sheet(t) {
@@ -422,73 +524,89 @@ export default class Usage extends View {
     const entry = shared(KEY)?.[p];
     const us = u.shown(entry, p);
     const tabs = tabsFor(props()?.installed ?? []);
-    // Primary limits first, then Antigravity's Claude and GPT tiers as one row. No more than its ROWS, which the
-    // popup was sized for.
+    // Primary limits first, then Antigravity's Claude and GPT tiers as one row. The popup was sized for all of
+    // them, so a provider that grows a per-model window never hides one.
     const other = u.otherModels((us?.limits ?? []).filter((l) => l.primary === false));
-    const limits = [...u.primary(us?.limits).slice(0, (u.ROWS[p] ?? 1) - (other ? 1 : 0)), ...(other ? [other] : [])];
+    const limits = [...u.primary(us?.limits), ...(other ? [other] : [])];
     const note = (text) => h_flex().h(ROW).px(8).items_center().text_color(t.dim).child(div().min_w(0).truncate().child(text));
     const divider = () => div().mx(7).my(4).h(1).flex_none().bg(t.border);
     // A limit, ROW tall: its label, its detail ("12 of 300") and when it resets, and the share left, on one line; a
     // 3px bar of the share left under it, draining as it's used. A balance (a `title`, no share) is the line alone.
     const row = (l) => {
       const used = Math.min(Math.max(l.percent, 0), 1);
-      const color = t[u.tone(used)] ?? t.muted;
-      const detail = [l.status, l.detail, l.resets_at && `resets ${u.resetsIn(l.resets_at)}`].filter(Boolean).join(" · ");
+      const color = l.expired ? t.dim : t[u.tone(used)] ?? t.muted;
+      const detail = l.expired ? "reset, waiting for a new reading"
+        : [l.status, l.detail, l.resets_at && `resets ${u.resetsIn(l.resets_at)}`].filter(Boolean).join(" · ");
       const line = h_flex().gap(8).items_center()
-        .child(div().min_w(0).truncate().text_color(t.foreground).child(u.longLabel(l.label)))
+        .child(div().min_w(0).truncate().text_color(l.expired ? t.dim : t.foreground).child(u.longLabel(l.label)))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(detail))
-        .child(l.title
-          ? div().flex_none().text_color(t.muted).child(l.title)
-          // "62% left": the share in its colour, the word small and dim, so it reads plainly in little room.
-          : h_flex().flex_none().gap(3).items_baseline()
-            .child(div().text_color(color).child(`${Math.round((1 - used) * 100)}%`))
-            .child(div().text_size(11).text_color(t.dim).child("left")));
+        .child(l.expired
+          ? div().flex_none().text_color(t.dim).child("—")
+          : l.title
+            ? div().flex_none().text_color(t.muted).child(l.title)
+            // "62% left": the share in its colour, the word small and dim, so it reads plainly in little room.
+            : h_flex().flex_none().gap(3).items_baseline()
+              .child(div().text_color(color).child(`${Math.round((1 - used) * 100)}%`))
+              .child(div().text_size(11).text_color(t.dim).child("left")));
       return v_flex().h(ROW).px(8).gap(5).justify_center().flex_none().child(line)
-        .when(!l.title, (el) => el.child(div().w_full().h(3).rounded(2).bg(t.border).child(div().h_full().rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))));
+        .when(!l.title && !l.expired, (el) => el.child(div().w_full().h(3).rounded(2).bg(t.border)
+          .child(div().h_full().rounded(2).bg(color).w(`${Math.round((1 - used) * 100)}%`))));
     };
     const today = [
       us?.today_tokens != null && `${u.formatTokens(us.today_tokens)} tokens`,
       us?.today_prompts != null && `${us.today_prompts} prompts`,
       us?.today_cost > 0 && `$${us.today_cost.toFixed(2)}`,
-      us?.week_cost > 0 && `week $${us.week_cost.toFixed(2)}`,
+    ].filter(Boolean);
+    const week = [
+      us?.week_tokens != null && `${u.formatTokens(us.week_tokens)} tokens`,
+      us?.week_prompts != null && `${us.week_prompts} prompts`,
+      us?.week_cost > 0 && `$${us.week_cost.toFixed(2)}`,
       us?.month_cost > 0 && `month $${us.month_cost.toFixed(2)}`,
     ].filter(Boolean);
+    const info = [today.length ? `Today: ${today.join(" · ")}` : null, week.length ? `7 days: ${week.join(" · ")}` : null].filter(Boolean);
+    const age = entry?.failed && entry.limitsAt ? u.ago(entry.limitsAt) : entry?.at ? u.ago(entry.at) : null;
+    const state = entry?.failed ? `last good reading ${age}` : age ? `updated ${age}` : null;
+    const tab = tabs.find((x) => x.p === p);
+    const tabRow = (row) => h_flex().gap(2).flex_none().children(row.map((x) => h_flex()
+      .id(`tab-${x.p}`)
+      .h(31)
+      .min_w(31)
+      .px(8)
+      .justify_center()
+      .items_center()
+      .rounded(7)
+      .when(x.p === p, (el) => el.bg(t.selected))
+      .when(x.p !== p, (el) => el.hover((s) => s.bg(t.hover)))
+      .tooltip(x.dim ? `${u.NAMES[x.p]} (not running)` : u.NAMES[x.p])
+      .on_click((_e, cx) => {
+        this.sheetFor = x.p;
+        this.read(x.p, cx);
+        cx.notify();
+      })
+      .child(div().when(x.dim && x.p !== p, (el) => el.opacity(0.4))
+        .child(icon(x.program, 14, x.p === p ? t.foreground : t.muted) ?? div().text_size(11).text_color(t.muted).child(u.NAMES[x.p])))));
     return v_flex()
       .size_full()
       .p(5)
       .bg(t.popover)
       .text_size(12.8)
       // The provider and its plan, as Herdr's popups title themselves.
-      .child(h_flex().h(24).px(8).gap(8).items_center().flex_none()
-        .child(div().text_size(11).text_color(t.dim).child(u.NAMES[p] ?? p))
-        .when(Boolean(us?.tier_label), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`· ${us.tier_label}`))))
+      .child(h_flex().h(24).px(8).gap(7).items_center().flex_none()
+        .when(Boolean(tab?.program?.icon), (el) => el.child(icon(tab.program, 14, t.foreground)))
+        .child(div().text_size(13).font_semibold().text_color(t.foreground).child(u.NAMES[p] ?? p))
+        .when(Boolean(us?.tier_label), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`· ${us.tier_label}`)))
+        .when(Boolean(state), (el) => el.child(div().text_size(11).text_color(t.dim).child(state))))
       .child(v_flex().flex_1().min_h(0)
         .when(!entry, (el) => el.child(note("Reading…")))
-        .when(Boolean(entry) && !us, (el) => el.child(note("Not signed in, or the login expired.")))
-        .when(Boolean(us) && !limits.length, (el) => el.child(note("No rate limits recorded.")))
+        .when(Boolean(entry) && !us, (el) => el.child(note(entry.error ? `Read failed: ${entry.error}` : p === "pi" || p === "opencode" ? "No usage recorded yet." : "Not signed in, or the login expired.")))
+        .when(Boolean(us) && !limits.length && !us.spend, (el) => el.child(note("No rate limits recorded.")))
         .children(limits.map(row))
         // A usage-limit reset Claude or Codex offers, when one is left.
         .when(Boolean(us?.reset_note), (el) => el.child(divider()).child(h_flex().px(8).h(28).items_center().text_size(11).text_color(t.dim).child(us.reset_note)))
-        .when(today.length > 0, (el) => el.child(divider()).child(h_flex().px(8).h(28).items_center().text_size(11).text_color(t.dim).child(`Today: ${today.join(" · ")}`))))
+        .when(info.length > 0, (el) => el.child(divider()).child(v_flex().flex_none()
+          .children(info.map((line) => h_flex().h(INFO_ROW).px(8).items_center()
+            .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(line)))))))
       // One tab per provider, at the bottom: the running ones, then the other installed agents', dimmed.
-      .when(tabs.length > 1, (el) => el.child(divider()).child(h_flex().gap(2).flex_none()
-        .children(tabs.map((x) => h_flex()
-          .id(`tab-${x.p}`)
-          .h(31)
-          .min_w(31)
-          .px(8)
-          .justify_center()
-          .items_center()
-          .rounded(7)
-          .when(x.p === p, (el) => el.bg(t.selected))
-          .when(x.p !== p, (el) => el.hover((s) => s.bg(t.hover)))
-          .tooltip(x.dim ? `${u.NAMES[x.p]} (not running)` : u.NAMES[x.p])
-          .on_click((_e, cx) => {
-            this.sheetFor = x.p;
-            this.read(x.p, cx);
-            cx.notify();
-          })
-          .child(div().when(x.dim && x.p !== p, (el) => el.opacity(0.4))
-            .child(icon(x.program, 14, x.p === p ? t.foreground : t.muted) ?? div().text_size(11).text_color(t.muted).child(u.NAMES[x.p])))))));
+      .when(tabs.length > 1, (el) => el.child(divider()).child(tabRow(tabs)));
   }
 }

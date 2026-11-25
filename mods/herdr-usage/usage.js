@@ -4,8 +4,8 @@
 
 /** Read an agent again after this long. */
 export const CACHE_TTL = 30_000;
-/** Limits older than this aren't shown: a provider that stops answering keeps its last ones only so long. */
-export const STALE = 180_000;
+/** A reading older than this is dimmed: it may no longer be true. It stays until a new one lands. */
+export const STALE = 15 * 60_000;
 /** Anthropic's usage endpoint answers about once every two minutes; asking more only draws 429s. */
 export const CLAUDE_LIVE_TTL = 120_000;
 /** Transcripts last written before this many minutes ago hold nothing from today. */
@@ -29,22 +29,19 @@ export function providerOf(name) {
   if (n.includes("cursor")) return "cursor";
   if (n.includes("openrouter")) return "openrouter";
   if (n.includes("deepseek")) return "deepseek";
+  if (n === "pi" || n.startsWith("pi-")) return "pi";
   if (n === "amp" || n.startsWith("amp-")) return "amp";
   return null;
 }
 
-/** The most rows each provider's popup tab shows, so the popup (which can't be resized once open) is sized
- *  for every tab and never scrolls. From what each reader returns: Claude's 5-hour, weekly and extra usage;
- *  Codex's two windows and credits; Antigravity's 5-hour and weekly buckets for Gemini, and its Claude and
- *  GPT tiers as one row; OpenCode's 5-hour, weekly and monthly; Copilot's premium requests, chat
- *  and completions; OpenRouter's credit limit and balance; DeepSeek's two currencies (CNY, USD). Amp's
- *  refilling pools are open-ended: the popup shows its first two. */
-export const ROWS = { claude: 3, codex: 3, antigravity: 3, grok: 1, opencode: 3, copilot: 3, cursor: 1, openrouter: 2, deepseek: 2, amp: 2 };
+/** The rows to reserve for a provider the popup hasn't read yet, so a tab that gains a per-model window can't
+ *  be cut off. A read provider uses its actual rows. */
+export const ROWS = { claude: 5, codex: 4, antigravity: 3, grok: 1, opencode: 3, copilot: 3, cursor: 1, openrouter: 2, deepseek: 2, pi: 1, amp: 2 };
 
 /** Each provider's name in the status bar and the popup. */
 export const NAMES = {
   claude: "Claude", codex: "Codex", antigravity: "Antigravity", grok: "Grok", opencode: "OpenCode",
-  copilot: "Copilot", cursor: "Cursor", openrouter: "OpenRouter", deepseek: "DeepSeek", amp: "Amp",
+  copilot: "Copilot", cursor: "Cursor", openrouter: "OpenRouter", deepseek: "DeepSeek", pi: "Pi", amp: "Amp",
 };
 
 /** Other tools' usage files a provider's numbers may be in (ai-usagebar, Omarchy), by name. */
@@ -71,7 +68,50 @@ export function keyFrom(text) {
 
 /** Today in UTC, as `YYYY-MM-DD`: the transcripts' timestamps are UTC. */
 export const todayUtc = (now = Date.now()) => new Date(now).toISOString().slice(0, 10);
+/** Midnight UTC six days ago, in ms: the start of a seven-day window ending today. */
+export const weekStartUtc = (now = Date.now()) => Date.parse(`${todayUtc(now)}T00:00:00Z`) - 6 * 86_400_000;
 const iso = (secs) => new Date(secs * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/** "just now", "3 min ago", "2 h ago": an old reading says how old it is. */
+export function ago(at, now = Date.now()) {
+  const s = Math.max(0, Math.floor((now - at) / 1000));
+  if (s < 90) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86_400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86_400)} d ago`;
+}
+
+/** A window's length in seconds, from the limit or its label. A calendar month has no fixed length. */
+export function durationOf(limit) {
+  if (typeof limit?.duration_s === "number") return limit.duration_s;
+  const s = String(limit?.label ?? "");
+  if (/5[- ]?h(our)?\b|session/i.test(s)) return 5 * 3600;
+  if (/weekly|7-day/i.test(s)) return 7 * 86_400;
+  return null;
+}
+
+/** How much of a window has passed, against how much of it is used: a bar past its tick is being spent too fast. */
+export function pace(limit, now = Date.now()) {
+  const duration = durationOf(limit);
+  const end = Date.parse(limit?.resets_at ?? "");
+  if (!duration || !Number.isFinite(end)) return null;
+  const elapsed = Math.min(1, Math.max(0, 1 - (end - now) / (duration * 1000)));
+  const used = Math.min(1, Math.max(0, limit.percent));
+  const verdict = used > elapsed + 0.1 ? "ahead" : used < elapsed - 0.1 ? "under" : "on pace";
+  return { elapsed, left: 1 - elapsed, verdict };
+}
+
+/** The pace as a tooltip, or null when the window is unknown. */
+export function paceText(limit, now = Date.now()) {
+  const p = pace(limit, now);
+  if (!p) return null;
+  const verdict = { ahead: "using it faster than the window", under: "room to spare", "on pace": "on pace" }[p.verdict];
+  return `${Math.round(p.left * 100)}% of the window left · ${verdict}`;
+}
+
+/** A limit whose reset time has passed is unknown until the next reading, never a guessed 0%. */
+export const isExpired = (limit, now = Date.now()) =>
+  typeof limit?.resets_at === "string" && Date.parse(limit.resets_at) < now;
 const capital = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 const parse = (line) => {
   try {
@@ -123,21 +163,43 @@ export function claudeLogin(text) {
   return { token: oauth.accessToken, plan };
 }
 
-/** Limits from Anthropic's usage endpoint, or null when it didn't answer with any (e.g. rate_limit_error). */
+const CLAUDE_WINDOWS = [
+  ["five_hour", "Session (5-hour)", 5 * 3600],
+  ["seven_day", "Weekly (7-day)", 7 * 86_400],
+  ["seven_day_opus", "Weekly · Opus", 7 * 86_400],
+  ["seven_day_sonnet", "Weekly · Sonnet", 7 * 86_400],
+];
+
+/** Limits from Anthropic's usage endpoint (or the claude CLI's reply), or null when it didn't answer with
+ *  any (e.g. rate_limit_error). Scoped weekly limits keep their model name. */
 export function claudeLimits(resp) {
   const limits = [];
-  for (const [key, label] of [["five_hour", "Session (5-hour)"], ["seven_day", "Weekly (7-day)"]]) {
-    const used = resp?.[key]?.utilization;
-    if (typeof used === "number") limits.push({ label, percent: used / 100, resets_at: resp[key].resets_at ?? null });
-  }
-  if (!limits.length && Array.isArray(resp?.limits)) {
+  if (Array.isArray(resp?.limits) && resp.limits.length) {
     for (const item of resp.limits) {
       if (typeof item?.percent !== "number") continue;
-      const label = String(item.kind ?? "").includes("session") ? "Session (5-hour)" : "Weekly (7-day)";
-      limits.push({ label, percent: item.percent / 100, resets_at: item.resets_at ?? null });
+      const kind = String(item.kind ?? "");
+      const scope = item.scope?.model?.display_name ?? item.scope?.surface ?? null;
+      const label = kind.includes("session") ? "Session (5-hour)" : scope ? `Weekly · ${scope}` : "Weekly (7-day)";
+      limits.push({ label, percent: item.percent / 100, resets_at: item.resets_at ?? null, duration_s: kind.includes("session") ? 5 * 3600 : 7 * 86_400 });
+    }
+  } else {
+    for (const [key, label, duration_s] of CLAUDE_WINDOWS) {
+      const used = resp?.[key]?.utilization;
+      if (typeof used === "number") limits.push({ label, percent: used / 100, resets_at: resp[key].resets_at ?? null, duration_s });
     }
   }
   return limits.length ? limits : null;
+}
+
+/** The claude CLI's `get_usage` reply as a plan and limits, or null. Runs no prompt and starts no turn. */
+export function claudeCli(text) {
+  const reply = String(text ?? "").split("\n").map(parse).find((m) => m?.type === "control_response");
+  const res = reply?.response;
+  if (res?.subtype !== "success") return null;
+  const body = res.response ?? {};
+  const limits = claudeLimits(body.rate_limits ?? {});
+  if (!limits) return null;
+  return { plan: typeof body.subscription_type === "string" ? capital(body.subscription_type.replace(/^claude_/, "")) : null, limits };
 }
 
 /** Claude's extra usage (paying past the limits), when it's on: popup only, not the bar. Amounts come in minor
@@ -158,8 +220,9 @@ export function claudeExtra(resp) {
 /** Today's tokens and prompts, the latest model and the rate limits its logs last recorded, from
  *  `{ file, line }` pairs of Codex session logs. A session's tokens are its last total of today. */
 export function codexStats(entries, today) {
-  let prompts = 0, model = null, modelAt = "", logLimits = null, limitsAt = "";
+  let prompts = 0, model = null, modelAt = "", logCredits = null;
   const sessions = new Map();
+  const logGroups = new Map();
   for (const { file, line } of entries) {
     const entry = parse(line);
     if (!entry) continue;
@@ -168,9 +231,12 @@ export function codexStats(entries, today) {
     if (entry.type === "event_msg" && p.type === "token_count") {
       const total = p.info?.total_token_usage?.total_tokens;
       if (typeof total === "number" && time.startsWith(today)) sessions.set(file, total);
-      if (p.rate_limits && typeof p.rate_limits === "object" && (logLimits === null || limitsAt < time)) {
-        logLimits = p.rate_limits;
-        limitsAt = time;
+      const rl = p.rate_limits;
+      if (rl && typeof rl === "object") {
+        const id = rl.limit_id ?? rl.limitId ?? "codex";
+        const seen = logGroups.get(id);
+        if (!seen || seen.at < time) logGroups.set(id, { at: time, group: { limit_name: rl.limit_name ?? rl.limitName, primary: rl.primary, secondary: rl.secondary } });
+        if (rl.credits) logCredits = rl.credits;
       }
     } else if (entry.type === "event_msg" && p.type === "user_message" && time.startsWith(today)) {
       prompts++;
@@ -181,7 +247,8 @@ export function codexStats(entries, today) {
   }
   let tokens = 0;
   for (const t of sessions.values()) tokens += t;
-  return { tokens, prompts, model, logLimits };
+  const logLimits = logGroups.size ? Object.fromEntries([...logGroups].map(([id, x]) => [id, x.group])) : null;
+  return { tokens, prompts, model, logLimits, logCredits };
 }
 
 /** The token and account in `~/.codex/auth.json`, or null. */
@@ -190,17 +257,71 @@ export function codexLogin(text) {
   return typeof t?.access_token === "string" ? { token: t.access_token, account: t.account_id ?? "" } : null;
 }
 
-/** Codex's usage endpoint's answer as its plan and its windows in the shape its logs record, or null. */
+/** A usage window from either Codex source: the endpoint's snake_case or app-server's camelCase. */
+const codexWindow = (w) => ({
+  used_percent: w?.used_percent ?? w?.usedPercent,
+  window_minutes: w?.window_minutes ?? w?.windowDurationMins
+    ?? (typeof w?.limit_window_seconds === "number" ? Math.floor(w.limit_window_seconds / 60) : undefined),
+  resets_at: w?.resets_at ?? w?.resetsAt ?? w?.reset_at,
+  resets_in_seconds: w?.resets_in_seconds,
+});
+
+const codexGroup = (g, name) => ({
+  limit_name: name ?? g?.limit_name ?? g?.limitName,
+  primary: codexWindow(g?.primary ?? g?.primary_window),
+  secondary: codexWindow(g?.secondary ?? g?.secondary_window),
+});
+
+/** Codex's usage endpoint's answer as its plan and per-model window groups, or null. */
 export function codexLive(resp) {
-  const rl = resp?.rate_limit;
+  const byId = resp?.rate_limits_by_limit_id ?? resp?.rateLimitsByLimitId;
+  const extras = Array.isArray(resp?.additional_rate_limits) ? resp.additional_rate_limits : [];
+  let windows = null;
+  if (byId && typeof byId === "object") {
+    windows = Object.fromEntries(Object.entries(byId).map(([id, g]) => [id, codexGroup(g)]));
+  } else if (resp?.rate_limit && typeof resp.rate_limit === "object") {
+    const rl = resp.rate_limit;
+    windows = { [rl.limit_id ?? rl.limitId ?? "codex"]: codexGroup(rl) };
+  }
+  for (const e of extras) {
+    if (!e || typeof e !== "object") continue;
+    const id = e.limit_id ?? e.limitId ?? e.limit_name ?? e.limitName ?? "extra";
+    windows = { ...(windows ?? {}), [id]: codexGroup(e) };
+  }
+  if (!windows) return null;
+  const plan = resp.plan_type ?? null;
+  return { plan: typeof plan === "string" ? capital(plan) : null, windows, credits: resp.credits ?? null, reset: codexReset(resp) };
+}
+
+/** The codex app-server's `account/rateLimits/read` reply as a plan and per-model window groups, or null. */
+export function codexRpc(text) {
+  const lines = String(text ?? "").split("\n").map(parse);
+  const reply = lines.find((m) => m?.id === 2);
+  if (reply) {
+    if (reply.error) return null;
+    const result = reply.result ?? {};
+    const byId = result.rateLimitsByLimitId ?? (result.rateLimits ? { [result.rateLimits.limitId ?? "codex"]: result.rateLimits } : null);
+    if (!byId || typeof byId !== "object") return null;
+    const plan = result.rateLimits?.planType ?? Object.values(byId)[0]?.planType ?? null;
+    const credits = result.rateLimits?.credits ?? Object.values(byId)[0]?.credits ?? null;
+    const reset = result.rateLimitResetCredits?.availableCount ?? result.rateLimitResetCredits?.available_count;
+    return {
+      plan: typeof plan === "string" ? capital(plan) : null,
+      windows: byId,
+      credits: credits ? { has_credits: credits.hasCredits === true, unlimited: credits.unlimited === true, balance: credits.balance } : null,
+      reset: typeof reset === "number" && reset > 0 ? { count: reset } : null,
+    };
+  }
+  const snap = lines.find((m) => m?.snapshot)?.snapshot ?? null;
+  const rl = snap?.payload?.rate_limits ?? snap?.rate_limits ?? null;
   if (!rl || typeof rl !== "object") return null;
-  const window = (w) => ({
-    used_percent: w?.used_percent,
-    window_minutes: typeof w?.limit_window_seconds === "number" ? Math.floor(w.limit_window_seconds / 60) : undefined,
-    resets_at: w?.reset_at,
-  });
-  const plan = typeof resp.plan_type === "string" ? capital(resp.plan_type) : null;
-  return { plan, windows: { primary: window(rl.primary_window), secondary: window(rl.secondary_window) }, credits: resp.credits ?? null, reset: codexReset(resp) };
+  const id = rl.limit_id ?? rl.limitId ?? "codex";
+  const plan = rl.plan_type ?? rl.planType ?? null;
+  return {
+    plan: typeof plan === "string" ? capital(plan) : null,
+    windows: { [id]: { limit_name: rl.limit_name ?? rl.limitName, primary: rl.primary, secondary: rl.secondary } },
+    credits: null, reset: null,
+  };
 }
 
 /** Codex's credits (from its usage endpoint or its logs), when it has any: popup only, not the bar. */
@@ -209,18 +330,28 @@ export function codexCredits(c) {
   return { label: "Credits", percent: 0, title: c.unlimited === true ? "Unlimited" : `${c.balance ?? 0} left`, bar: false };
 }
 
-/** Codex's windows as limits. */
+/** Codex's windows as limits: one row per window, per model group when it reports more than one. */
 export function codexLimits(windows, now = Date.now()) {
+  const groups = windows?.primary || windows?.secondary || windows?.primary_window ? { codex: windows } : windows ?? {};
   const limits = [];
-  for (const key of ["primary", "secondary"]) {
-    const w = windows?.[key];
-    if (typeof w?.used_percent !== "number") continue;
-    const m = w.window_minutes;
-    const label = m === 10080 ? "Weekly (7-day)" : m === 43200 ? "Monthly" : typeof m !== "number" ? "Rate limit"
-      : m % 60 === 0 ? `${m / 60}-hour window` : `${m}-minute window`;
-    const resets_at = typeof w.resets_at === "number" ? iso(w.resets_at)
-      : typeof w.resets_in_seconds === "number" ? iso(Math.floor(now / 1000) + w.resets_in_seconds) : null;
-    limits.push({ label, percent: w.used_percent / 100, resets_at });
+  for (const [id, g] of Object.entries(groups)) {
+    if (!g || typeof g !== "object") continue;
+    const name = id === "codex" ? null : (g.limit_name ?? g.limitName ?? id);
+    for (const key of ["primary", "secondary"]) {
+      const w = g[key] ?? g[`${key}_window`];
+      const used = w?.used_percent ?? w?.usedPercent;
+      if (typeof used !== "number") continue;
+      const m = w.window_minutes ?? w.windowDurationMins
+        ?? (typeof w?.limit_window_seconds === "number" ? Math.floor(w.limit_window_seconds / 60) : undefined);
+      const base = m === 10080 ? "Weekly (7-day)" : m === 43200 ? "Monthly" : typeof m !== "number" ? "Rate limit"
+        : m % 60 === 0 ? `${m / 60}-hour window` : `${m}-minute window`;
+      const label = !name ? base : base === "Weekly (7-day)" ? `Weekly · ${name}` : `${base} · ${name}`;
+      const resetAt = w.resets_at ?? w.resetsAt;
+      const resets_at = typeof resetAt === "string" ? resetAt
+        : typeof resetAt === "number" ? iso(resetAt)
+        : typeof w.resets_in_seconds === "number" ? iso(Math.floor(now / 1000) + w.resets_in_seconds) : null;
+      limits.push({ label, percent: used / 100, resets_at, duration_s: typeof m === "number" ? m * 60 : undefined });
+    }
   }
   return limits;
 }
@@ -228,8 +359,13 @@ export function codexLimits(windows, now = Date.now()) {
 /** Claude's or Codex's limits from another tool's usage file. */
 export function claudeCache(json) {
   if (!json) return null;
-  const limits = (Array.isArray(json.limits) ? json.limits : []).map((l) =>
-    l.label ? l : { ...l, label: String(l.kind ?? "").includes("session") ? "Session (5-hour)" : "Weekly (7-day)" });
+  const limits = (Array.isArray(json.limits) ? json.limits : []).map((l) => {
+    if (l.label) return { ...l, duration_s: l.duration_s ?? durationOf(l) };
+    const kind = String(l.kind ?? "");
+    const scope = l.scope?.model?.display_name ?? l.scope?.surface ?? null;
+    const label = kind.includes("session") ? "Session (5-hour)" : scope ? `Weekly · ${scope}` : "Weekly (7-day)";
+    return { ...l, label, duration_s: kind.includes("session") ? 5 * 3600 : 7 * 86_400 };
+  });
   return { plan: json.tierLabel ?? json.tier_label ?? null, limits };
 }
 export const codexCache = (json) => json && { plan: json.tierLabel ?? json.plan_type ?? null, limits: Array.isArray(json.limits) ? json.limits : [] };
@@ -297,7 +433,8 @@ export function antigravityProbe(data) {
       const label = group === "Gemini Models"
         ? b.window === "5h" ? "Session (5-hour)" : b.window === "weekly" ? "Weekly (7-day)" : name
         : group ? `${group} ${name}` : name;
-      limits.push({ label, percent: Math.round(used * 100) / 100, resets_at: b.reset_time ?? null, primary: !antigravityIsSecondary(`${group} ${name}`) });
+      const duration_s = b.window === "5h" ? 5 * 3600 : b.window === "weekly" ? 7 * 86_400 : undefined;
+      limits.push({ label, percent: Math.round(used * 100) / 100, resets_at: b.reset_time ?? null, ...(duration_s && { duration_s }), primary: !antigravityIsSecondary(`${group} ${name}`) });
     }
   }
   return limits;
@@ -343,7 +480,7 @@ export function grokLogin(text) {
 export function grokBilling(resp) {
   if (!resp || typeof resp !== "object") return null;
   const limits = typeof resp.creditUsagePercent === "number"
-    ? [{ label: "Weekly SuperGrok Limit", percent: resp.creditUsagePercent / 100, resets_at: resp.currentPeriod?.end ?? resp.billingPeriodEnd ?? null }]
+    ? [{ label: "Weekly SuperGrok Limit", percent: resp.creditUsagePercent / 100, resets_at: resp.currentPeriod?.end ?? resp.billingPeriodEnd ?? null, duration_s: 7 * 86_400 }]
     : [];
   return { plan: resp.plan ?? resp.tier ?? null, limits };
 }
@@ -362,33 +499,51 @@ export function grokCache(json) {
 
 // --- OpenCode Go ---------------------------------------------------------------------------
 
-/** Today's prompts, tokens and cost from OpenCode's database: sqlite3's `prompts|tokens|cost` line for each of
- *  its message tables (v2's session_message, v1's message). Tokens as Claude's are counted: input, output,
- *  reasoning and cache writes. */
+/** Today's and the week's prompts, tokens and cost from OpenCode's database: sqlite3's
+ *  `today prompts|tokens|cost|week prompts|tokens|cost` line per message store. A 3-field line is today
+ *  only (another tool's cache). Tokens as Claude's are counted: input, output, reasoning and cache writes. */
 export function opencodeStats(...outputs) {
-  let prompts = 0, tokens = 0, cost = 0;
+  let prompts = 0, tokens = 0, cost = 0, week_prompts = 0, week_tokens = 0, week_cost = 0;
   for (const out of outputs) {
-    const [p, t, c] = String(out ?? "").trim().split("|").map(Number);
-    if (Number.isFinite(p)) prompts += p;
-    if (Number.isFinite(t)) tokens += t;
-    if (Number.isFinite(c)) cost += c;
+    const n = String(out ?? "").trim().split("|").map(Number);
+    if (n.length >= 6) {
+      const [p, t, c, wp, wt, wc] = n;
+      if (Number.isFinite(p)) prompts += p;
+      if (Number.isFinite(t)) tokens += t;
+      if (Number.isFinite(c)) cost += c;
+      if (Number.isFinite(wp)) week_prompts += wp;
+      if (Number.isFinite(wt)) week_tokens += wt;
+      if (Number.isFinite(wc)) week_cost += wc;
+    } else {
+      const [p, t, c] = n;
+      if (Number.isFinite(p)) prompts += p;
+      if (Number.isFinite(t)) tokens += t;
+      if (Number.isFinite(c)) cost += c;
+    }
   }
-  return { prompts, tokens, cost };
+  return { prompts, tokens, cost, week_prompts, week_tokens, week_cost };
 }
 
-/** OpenCode Go's key: OpenCode v2's active credential (sqlite3's output), else the older auth file. */
-export function opencodeKey(dbOut, authText) {
+/** OpenCode Go's key: OpenCode v2's active credential (sqlite3's output), else the first auth file that has
+ *  one (`opencode-go` or `opencode`). */
+export function opencodeKey(dbOut, ...authTexts) {
   const key = parse(dbOut ?? "")?.key;
-  return typeof key === "string" ? key : parse(authText ?? "")?.["opencode-go"]?.key ?? null;
+  if (typeof key === "string") return key;
+  for (const text of authTexts) {
+    const auth = parse(text ?? "");
+    const found = auth?.["opencode-go"]?.key ?? auth?.opencode?.key;
+    if (typeof found === "string") return found;
+  }
+  return null;
 }
 
 /** The three windows of `GET /zen/go/v1/usage`: a rolling 5-hour, a weekly and a monthly budget. A window the
- *  provider calls `rate-limited` says so on its row. */
+ *  provider calls `rate-limited` says so on its row; a calendar month has no fixed length to pace against. */
 export function opencodeLimits(usage) {
-  return [["rolling", "5-hour"], ["weekly", "Weekly"], ["monthly", "Monthly"]].flatMap(([key, label]) => {
+  return [["rolling", "5-hour", 5 * 3600], ["weekly", "Weekly", 7 * 86_400], ["monthly", "Monthly", null]].flatMap(([key, label, duration_s]) => {
     const w = usage?.[key];
     if (typeof w?.percent !== "number") return [];
-    return [{ label, percent: w.percent / 100, resets_at: w.resetsAt ?? null, ...(w.status && w.status !== "ok" && { status: w.status }) }];
+    return [{ label, percent: w.percent / 100, resets_at: w.resetsAt ?? null, ...(duration_s && { duration_s }), ...(w.status && w.status !== "ok" && { status: w.status }) }];
   });
 }
 
@@ -544,10 +699,44 @@ export function ampParse(text) {
   return { tier_label: balances.join(" · ") || "Amp", limits, today_tokens: tokens ?? 0, ...(spent > 0 && { today_cost: spent }) };
 }
 
+// --- Pi ------------------------------------------------------------------------------------
+
+/** Today's and the week's tokens, prompts and latest model from Pi's session files. A reply's `usage` is
+ *  counted only as one of the message's own fields, never inside a tool call's arguments. */
+export function piStats(lines, today, weekStart) {
+  let today_tokens = 0, today_prompts = 0, week_tokens = 0, week_prompts = 0;
+  let model = null, modelAt = "";
+  for (const line of lines) {
+    const entry = parse(line);
+    if (entry?.type !== "message") continue;
+    const at = Date.parse(entry.timestamp ?? "");
+    if (!Number.isFinite(at)) continue;
+    const message = entry.message ?? {};
+    if (message.role === "user" && at >= weekStart) {
+      week_prompts++;
+      if (String(entry.timestamp).startsWith(today)) today_prompts++;
+    }
+    if (message.role !== "assistant") continue;
+    const usage = message.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const total = typeof usage.totalTokens === "number" && usage.totalTokens > 0 ? usage.totalTokens
+      : (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+    if (!(total > 0)) continue;
+    if (at >= weekStart) week_tokens += total;
+    if (String(entry.timestamp).startsWith(today)) today_tokens += total;
+    const name = message.model ?? message.modelId ?? null;
+    if (typeof name === "string" && (model === null || modelAt < entry.timestamp)) {
+      model = name;
+      modelAt = entry.timestamp;
+    }
+  }
+  return { today_tokens, today_prompts, week_tokens, week_prompts, model };
+}
+
 // --- All -----------------------------------------------------------------------------------
 
 /** One agent's usage, or null when there is nothing to say. Tokens and prompts only where known. */
-export function usage({ plan, model, limits, tokens, prompts, cost, week, month, reset }) {
+export function usage({ plan, model, limits, tokens, prompts, cost, week, month, week_tokens, week_prompts, spend, reset }) {
   if (!tokens && !prompts && !limits?.length && !plan && !model) return null;
   const reset_note = resetNote(reset);
   return {
@@ -561,6 +750,11 @@ export function usage({ plan, model, limits, tokens, prompts, cost, week, month,
     // OpenRouter's spend this week and this month, beside today's.
     ...(week > 0 && { week_cost: week }),
     ...(month > 0 && { month_cost: month }),
+    // Token spend over seven days, for OpenCode and Pi (limits providers have no week total).
+    ...(week_tokens != null && { week_tokens }),
+    ...(week_prompts != null && { week_prompts }),
+    // A provider with no limits at all: the bar shows its tokens, not a dash.
+    ...(spend && { spend: true }),
   };
 }
 
@@ -568,21 +762,25 @@ export function usage({ plan, model, limits, tokens, prompts, cost, week, month,
  *  keeps its last limits (and when they were read). */
 export function merge(old, fresh, now = Date.now()) {
   const has = (u) => Boolean(u?.limits?.length);
+  if (!fresh) return { at: now, usage: old?.usage ?? null, limitsAt: old?.limitsAt ?? null };
   if (has(fresh)) return { at: now, usage: fresh, limitsAt: now };
   if (old?.limitsAt && has(old.usage)) {
-    return { at: now, usage: fresh ? { ...fresh, limits: old.usage.limits } : old.usage, limitsAt: old.limitsAt };
+    return { at: now, usage: { ...fresh, limits: old.usage.limits }, limitsAt: old.limitsAt };
   }
   return { at: now, usage: fresh, limitsAt: null };
 }
 
-/** The cached usage as it may be shown now: limits read too long ago, whose window has reset since, or
- *  without a number, aren't known. Claude's stand until their windows reset, since its endpoint often refuses a read. */
+/** The cached usage as it may be shown now: a window whose reset has passed is marked expired (shown as `—`,
+ *  never as a guessed 0%), a reading over 15 minutes old is marked stale, and a failed read keeps its last
+ *  good numbers, dimmed. */
 export function shown(entry, provider, now = Date.now()) {
   if (!entry?.usage) return null;
-  let limits = entry.usage.limits ?? [];
-  if (provider !== "claude" && (!entry.limitsAt || now - entry.limitsAt >= STALE)) limits = [];
-  limits = limits.filter((l) => Number.isFinite(l.percent) && !(typeof l.resets_at === "string" && Date.parse(l.resets_at) < now));
-  return { ...entry.usage, limits };
+  const limits = (entry.usage.limits ?? [])
+    .filter((l) => Number.isFinite(l.percent))
+    .map((l) => (isExpired(l, now) ? { ...l, expired: true } : l));
+  const at = typeof entry.limitsAt === "number" ? entry.limitsAt : entry.at;
+  const age = typeof at === "number" ? now - at : 0;
+  return { ...entry.usage, limits, stale: age >= STALE, failed: Boolean(entry.failed), error: entry.error ?? null };
 }
 
 /** The limits that make the headline: all but Antigravity's secondary tiers. */
@@ -590,43 +788,52 @@ export const primary = (limits) => (limits ?? []).filter((l) => l.primary !== fa
 /** The limits on the status bar: the headline ones, but not extra usage or credits, which only matter in the popup. */
 export const onBar = (limits) => primary(limits).filter((l) => l.bar !== false);
 
-/** The highest share used among the primary limits, or null. */
+/** The highest share used among the primary limits, or null. An expired window isn't a reading. */
 export function highestPercent(limits) {
-  const counted = primary(limits);
+  const counted = primary(limits).filter((l) => !l.expired);
   return counted.length ? Math.max(...counted.map((l) => Math.min(Math.max(l.percent, 0), 1))) : null;
 }
 
-/** A limit's label for the status bar: "5h", "7d", "30d", or the label itself. */
+/** Split "Weekly · Opus" into its window and the model it applies to. */
+const labelParts = (label) => {
+  const [base, ...rest] = String(label ?? "").split("·").map((s) => s.trim());
+  return { base, suffix: rest.join(" · ") };
+};
+const withSuffix = (short, suffix) => (suffix ? `${short} ${suffix}` : short);
+
+/** A limit's label for the status bar: "5h", "7d", "30d", or the label itself; a scoped window keeps its model. */
 export function shortLabel(label) {
-  const s = String(label ?? "");
-  if (/5[- ]?h(our)?\b/i.test(s)) return "5h";
-  if (/weekly|7-day/i.test(s)) return "7d";
-  if (/monthly/i.test(s)) return "30d";
-  const m = /^(\d+)-(hour|minute) window$/.exec(s);
-  return m ? `${m[1]}${m[2][0]}` : s;
+  const { base, suffix } = labelParts(label);
+  if (/5[- ]?h(our)?\b/i.test(base)) return withSuffix("5h", suffix);
+  if (/weekly|7-day/i.test(base)) return withSuffix("7d", suffix);
+  if (/monthly/i.test(base)) return withSuffix("30d", suffix);
+  const m = /^(\d+)-(hour|minute) window$/.exec(base);
+  return m ? withSuffix(`${m[1]}${m[2][0]}`, suffix) : String(label ?? "");
 }
 
 /** A limit's label in the popup: the same words for the same window whichever provider names it
  *  ("Session (5-hour)", "5-hour" → "5-hour"; "Weekly (7-day)", "Weekly SuperGrok Limit" → "Weekly"). */
 export function longLabel(label) {
-  const s = String(label ?? "");
-  if (/5-hour|session/i.test(s)) return "5-hour";
-  if (/weekly|7-day/i.test(s)) return "Weekly";
-  if (/monthly/i.test(s)) return "Monthly";
-  return s;
+  const { base, suffix } = labelParts(label);
+  const withLongSuffix = (long) => (suffix ? `${long} · ${suffix}` : long);
+  if (/5-hour|session/i.test(base)) return withLongSuffix("5-hour");
+  if (/weekly|7-day/i.test(base)) return withLongSuffix("Weekly");
+  if (/monthly/i.test(base)) return withLongSuffix("Monthly");
+  return String(label ?? "");
 }
 
 /** Antigravity's Claude and GPT tiers (its secondary limits) as one row: the most used one's share and reset,
  *  and each window's share left as its detail ("5h 80% · 7d 90%"). Null when there are none. */
 export function otherModels(limits) {
-  if (!limits?.length) return null;
-  const most = limits.reduce((a, b) => (b.percent > a.percent ? b : a));
+  const live = (limits ?? []).filter((l) => !l.expired);
+  if (!live.length) return null;
+  const most = live.reduce((a, b) => (b.percent > a.percent ? b : a));
   const left = (l) => Math.round((1 - Math.min(Math.max(l.percent, 0), 1)) * 100);
   return {
     label: "Claude & GPT",
     percent: most.percent,
     resets_at: most.resets_at ?? null,
-    detail: limits.length > 1 ? limits.map((l) => `${shortLabel(l.label)} ${left(l)}%`).join(" · ") : null,
+    detail: live.length > 1 ? live.map((l) => `${shortLabel(l.label)} ${left(l)}%`).join(" · ") : null,
   };
 }
 
